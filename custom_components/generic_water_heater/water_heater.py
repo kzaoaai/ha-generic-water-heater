@@ -213,7 +213,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._eco_value = eco_value
         self._unit_of_measurement = unit
         self._current_operation = STATE_ELECTRIC
-        self._saved_operation_mode = STATE_ELECTRIC
         self._current_temperature = None
         self._operation_list = [
             STATE_ELECTRIC,
@@ -321,18 +320,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_set_operation_mode(self, operation_mode):
         """Set new operation mode."""
-        if operation_mode != STATE_OFF:
-            self._saved_operation_mode = operation_mode
         self._current_operation = operation_mode
         _LOGGER.debug("%s: async_set_operation_mode -> mode=%s", self.name, self._current_operation)
         await self._async_control_heating()
 
     async def async_turn_on(self, **kwargs):
         """Turn the entity on."""
-        mode = getattr(self, "_saved_operation_mode", STATE_ELECTRIC)
-        if mode == STATE_OFF:
-            mode = STATE_ELECTRIC
-        await self.async_set_operation_mode(mode)
+        await self.async_set_operation_mode(STATE_ELECTRIC)
 
     async def async_turn_off(self, **kwargs):
         """Turn the entity off."""
@@ -371,8 +365,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             
             if self._current_operation not in self._operation_list:
                 self._current_operation = STATE_OFF
-            elif self._current_operation != STATE_OFF:
-                self._saved_operation_mode = self._current_operation
         
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
@@ -447,9 +439,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 _LOGGER.debug("Manual switch override detected: %s", new_state.state)
                 if new_state.state == STATE_ON:
                     if self._current_operation not in (STATE_ELECTRIC, STATE_ECO, STATE_PERFORMANCE):
-                         self._current_operation = getattr(self, "_saved_operation_mode", STATE_ELECTRIC)
-                         if self._current_operation == STATE_OFF:
-                             self._current_operation = STATE_ELECTRIC
+                         self._current_operation = STATE_ELECTRIC
                 elif new_state.state == STATE_OFF:
                     self._current_operation = STATE_OFF
                 
