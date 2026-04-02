@@ -6,7 +6,7 @@ from homeassistant.const import CONF_NAME
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import selector
 
-from . import DOMAIN, CONF_HEATER, CONF_SENSOR, CONF_TEMP_STEP, CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_TEMP_MIN, CONF_TEMP_MAX, CONF_MIN_CYCLE_DURATION, CONF_ECO_ENTITY, CONF_ECO_VALUE
+from . import DOMAIN, CONF_HEATER, CONF_SENSOR, CONF_TEMP_STEP, CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_TEMP_MIN, CONF_TEMP_MAX, CONF_MIN_ON_DURATION, CONF_MIN_OFF_DURATION, CONF_ECO_ENTITY, CONF_ECO_VALUE
 
 
 class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -37,7 +37,8 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_HOT_TOLERANCE, default=0.0): vol.Coerce(float),
                 vol.Optional(CONF_TEMP_MIN, default=15.0): vol.Coerce(float),
                 vol.Optional(CONF_TEMP_MAX, default=80.0): vol.Coerce(float),
-                vol.Optional(CONF_MIN_CYCLE_DURATION, default={"seconds": 10}): selector({"duration": {}}),
+                vol.Optional(CONF_MIN_ON_DURATION, default={"seconds": 0}): selector({"duration": {}}),
+                vol.Optional(CONF_MIN_OFF_DURATION, default={"seconds": 120}): selector({"duration": {}}),
                 vol.Optional(CONF_ECO_ENTITY): selector({"entity": {"domain": ["sensor", "binary_sensor"]}}),
                 vol.Optional(CONF_ECO_VALUE): cv.string,
             }
@@ -73,7 +74,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(CONF_HOT_TOLERANCE, default=current.get(CONF_HOT_TOLERANCE, 0.0)): vol.Coerce(float),
                 vol.Optional(CONF_TEMP_MIN, default=current.get(CONF_TEMP_MIN, 15.0)): vol.Coerce(float),
                 vol.Optional(CONF_TEMP_MAX, default=current.get(CONF_TEMP_MAX, 80.0)): vol.Coerce(float),
-                vol.Optional(CONF_MIN_CYCLE_DURATION, default=current.get(CONF_MIN_CYCLE_DURATION, {"seconds": 10})): selector({"duration": {}}),
+                vol.Optional(CONF_MIN_ON_DURATION, default=current.get(CONF_MIN_ON_DURATION, current.get("min_cycle_duration", {"seconds": 0}))): selector({"duration": {}}),
+                vol.Optional(CONF_MIN_OFF_DURATION, default=current.get(CONF_MIN_OFF_DURATION, current.get("min_cycle_duration", {"seconds": 120}))): selector({"duration": {}}),
                 vol.Optional(CONF_ECO_ENTITY, **eco_entity_args): selector({"entity": {"domain": ["sensor", "binary_sensor"]}}),
                 vol.Optional(CONF_ECO_VALUE, **eco_value_args): cv.string,
             }

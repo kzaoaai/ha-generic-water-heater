@@ -32,7 +32,7 @@ from homeassistant.const import UnitOfTemperature
 from homeassistant.util.unit_conversion import TemperatureConverter
 import homeassistant.util.dt as dt_util
 
-from . import DOMAIN, CONF_HEATER, CONF_SENSOR, CONF_TARGET_TEMP, CONF_TEMP_STEP, CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_TEMP_MIN, CONF_TEMP_MAX, CONF_MIN_CYCLE_DURATION, CONF_ECO_ENTITY, CONF_ECO_VALUE
+from . import DOMAIN, CONF_HEATER, CONF_SENSOR, CONF_TARGET_TEMP, CONF_TEMP_STEP, CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_TEMP_MIN, CONF_TEMP_MAX, CONF_MIN_ON_DURATION, CONF_MIN_OFF_DURATION, CONF_ECO_ENTITY, CONF_ECO_VALUE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,7 +55,8 @@ async def async_setup_platform(
         hot_tolerance = config.get(CONF_HOT_TOLERANCE, 0.0)
         min_temp = config.get(CONF_TEMP_MIN, 15.0)
         max_temp = config.get(CONF_TEMP_MAX, 80.0)
-        min_cycle_duration = config.get(CONF_MIN_CYCLE_DURATION)
+        min_on_duration = config.get(CONF_MIN_ON_DURATION, config.get("min_cycle_duration"))
+        min_off_duration = config.get(CONF_MIN_OFF_DURATION, config.get("min_cycle_duration"))
         eco_entity_id = config.get(CONF_ECO_ENTITY)
         eco_value = config.get(CONF_ECO_VALUE)
         unit = hass.config.units.temperature_unit
@@ -80,7 +81,8 @@ async def async_setup_platform(
                 hot_tolerance,
                 min_temp,
                 max_temp,
-                min_cycle_duration,
+                min_on_duration,
+                min_off_duration,
                 eco_entity_id,
                 eco_value,
                 unit,
@@ -105,7 +107,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     hot_tolerance = data.get(CONF_HOT_TOLERANCE, 0.0)
     min_temp = data.get(CONF_TEMP_MIN, 15.0)
     max_temp = data.get(CONF_TEMP_MAX, 80.0)
-    min_cycle_duration = data.get(CONF_MIN_CYCLE_DURATION)
+    min_on_duration = data.get(CONF_MIN_ON_DURATION, data.get("min_cycle_duration"))
+    min_off_duration = data.get(CONF_MIN_OFF_DURATION, data.get("min_cycle_duration"))
     eco_entity_id = data.get(CONF_ECO_ENTITY)
     eco_value = data.get(CONF_ECO_VALUE)
     unit = hass.config.units.temperature_unit
@@ -116,8 +119,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     device_identifiers = None
     current_device_id = None
 
-    if min_cycle_duration is not None and isinstance(min_cycle_duration, dict):
-        min_cycle_duration = cv.time_period(min_cycle_duration)
+    if min_on_duration is not None and isinstance(min_on_duration, dict):
+        min_on_duration = cv.time_period(min_on_duration)
+        
+    if min_off_duration is not None and isinstance(min_off_duration, dict):
+        min_off_duration = cv.time_period(min_off_duration)
 
     if entity_entry and entity_entry.device_id:
         device_entry = device_registry.async_get(entity_entry.device_id)
@@ -149,7 +155,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 hot_tolerance,
                 min_temp,
                 max_temp,
-                min_cycle_duration,
+                min_on_duration,
+                min_off_duration,
                 eco_entity_id,
                 eco_value,
                 unit,
@@ -181,7 +188,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         hot_tolerance,
         min_temp,
         max_temp,
-        min_cycle_duration,
+        min_on_duration,
+        min_off_duration,
         eco_entity_id,
         eco_value,
         unit,
@@ -199,11 +207,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._hot_tolerance = hot_tolerance
         self._min_temp = min_temp
         self._max_temp = max_temp
-        self._min_cycle_duration = min_cycle_duration if min_cycle_duration else timedelta(seconds=10)
+        self._min_on_duration = min_on_duration if min_on_duration else timedelta(seconds=0)
+        self._min_off_duration = min_off_duration if min_off_duration else timedelta(seconds=120)
         self._eco_entity_id = eco_entity_id
         self._eco_value = eco_value
         self._unit_of_measurement = unit
         self._current_operation = STATE_ELECTRIC
+        self._saved_operation_mode = STATE_ELECTRIC
         self._current_temperature = None
         self._operation_list = [
             STATE_ELECTRIC,
@@ -311,13 +321,18 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_set_operation_mode(self, operation_mode):
         """Set new operation mode."""
+        if operation_mode != STATE_OFF:
+            self._saved_operation_mode = operation_mode
         self._current_operation = operation_mode
         _LOGGER.debug("%s: async_set_operation_mode -> mode=%s", self.name, self._current_operation)
         await self._async_control_heating()
 
     async def async_turn_on(self, **kwargs):
         """Turn the entity on."""
-        await self.async_set_operation_mode(STATE_ELECTRIC)
+        mode = getattr(self, "_saved_operation_mode", STATE_ELECTRIC)
+        if mode == STATE_OFF:
+            mode = STATE_ELECTRIC
+        await self.async_set_operation_mode(mode)
 
     async def async_turn_off(self, **kwargs):
         """Turn the entity off."""
@@ -356,6 +371,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             
             if self._current_operation not in self._operation_list:
                 self._current_operation = STATE_OFF
+            elif self._current_operation != STATE_OFF:
+                self._saved_operation_mode = self._current_operation
         
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
@@ -430,7 +447,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 _LOGGER.debug("Manual switch override detected: %s", new_state.state)
                 if new_state.state == STATE_ON:
                     if self._current_operation not in (STATE_ELECTRIC, STATE_ECO, STATE_PERFORMANCE):
-                         self._current_operation = STATE_ELECTRIC
+                         self._current_operation = getattr(self, "_saved_operation_mode", STATE_ELECTRIC)
+                         if self._current_operation == STATE_OFF:
+                             self._current_operation = STATE_ELECTRIC
                 elif new_state.state == STATE_OFF:
                     self._current_operation = STATE_OFF
                 
@@ -512,11 +531,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         now = dt_util.utcnow()
         if self._last_switch_change_time:
             delta = now - self._last_switch_change_time
-            if delta < self._min_cycle_duration:
-                _LOGGER.debug("Cooldown active, delaying turn_on")
+            if delta < self._min_off_duration:
+                _LOGGER.debug("Cooldown active (min_off_duration), delaying turn_on")
                 if self._cooldown_timer:
                     self._cooldown_timer()
-                self._cooldown_timer = async_call_later(self.hass, (self._min_cycle_duration - delta).total_seconds(), self._async_control_heating_callback)
+                self._cooldown_timer = async_call_later(self.hass, (self._min_off_duration - delta).total_seconds(), self._async_control_heating_callback)
                 return
 
         self._last_commanded_switch_state = STATE_ON
@@ -536,11 +555,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         now = dt_util.utcnow()
         if self._last_switch_change_time:
             delta = now - self._last_switch_change_time
-            if delta < self._min_cycle_duration:
-                _LOGGER.debug("Cooldown active, delaying turn_off")
+            if delta < self._min_on_duration:
+                _LOGGER.debug("Cooldown active (min_on_duration), delaying turn_off")
                 if self._cooldown_timer:
                     self._cooldown_timer()
-                self._cooldown_timer = async_call_later(self.hass, (self._min_cycle_duration - delta).total_seconds(), self._async_control_heating_callback)
+                self._cooldown_timer = async_call_later(self.hass, (self._min_on_duration - delta).total_seconds(), self._async_control_heating_callback)
                 return
 
         self._last_commanded_switch_state = STATE_OFF

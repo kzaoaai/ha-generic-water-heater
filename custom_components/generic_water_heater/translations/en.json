@@ -12,7 +12,8 @@
           "hot_tolerance": "Hot Tolerance",
           "min_temp": "Minimum Temperature",
           "max_temp": "Maximum Temperature",
-          "min_cycle_duration": "Minimum Cycle Duration",
+          "min_on_duration": "Minimum On Duration",
+          "min_off_duration": "Minimum Off Duration",
           "eco_entity": "Eco Mode Entity",
           "eco_value": "Eco Mode Value"
         }
@@ -32,7 +33,8 @@
           "hot_tolerance": "Hot Tolerance",
           "min_temp": "Minimum Temperature",
           "max_temp": "Maximum Temperature",
-          "min_cycle_duration": "Minimum Cycle Duration",
+          "min_on_duration": "Minimum On Duration",
+          "min_off_duration": "Minimum Off Duration",
           "eco_entity": "Eco Mode Entity",
           "eco_value": "Eco Mode Value"
         }

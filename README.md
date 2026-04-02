@@ -6,7 +6,7 @@ The `Generic Water Heater` integration is a custom component for Home Assistant 
 
 *   **Thermostat Logic**: Keeps water temperature within a specific range using gnd options.
 *   **Manual Override**: Detects if the underlying switch is manually toggled and temporarily respects that state before resuming automatic control.
-*   **Safety Cooldown**: Prevents rapid switching to protect electrical components (configurable, default 10s).
+*   **Safety Cooldown**: Prevents rapid switching to protect electrical components (configurable `min_on_duration` and `min_off_duration`).
 *   **Failsafe**: Automatically turns off the heater if the temperature sensor becomes unavailable.
 *   **Device Linking**: Automatically attaches the water heater entity to the same device as the switch (if applicable).
 *   **HVAC Action**: Reports current status as "Heating", "Idle" (Target reached), or "Off".
@@ -48,7 +48,8 @@ generic_water_heater:
     hot_tolerance: 0.3
     min_temp: 30
     max_temp: 70
-    cooldown: 10
+    min_on_duration: 0
+    min_off_duration: 120
 ```
 ##Configuration Options
 
@@ -60,4 +61,5 @@ generic_water_heater:
 | `hot_tolerance` | float | 0.3 | Minimum difference above target to turn OFF. |
 | `min_temp` | float | *HA Default* | Minimum selectable temperature in the UI. |
 | `max_temp` | float | *HA Default* | Maximum selectable temperature in the UI. |
-| `cooldown` | float | 10.0 | Minimum time (seconds) between switch toggles to prevent rapid cycling. |
+| `min_on_duration` | float | 0.0 | Minimum time (seconds) to keep the heater ON before it can be turned OFF. |
+| `min_off_duration` | float | 120.0 | Minimum time (seconds) to keep the heater OFF before it can be turned ON. |

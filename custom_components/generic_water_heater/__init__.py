@@ -22,7 +22,8 @@ CONF_COLD_TOLERANCE = "cold_tolerance"
 CONF_HOT_TOLERANCE = "hot_tolerance"
 CONF_TEMP_MIN = "min_temp"
 CONF_TEMP_MAX = "max_temp"
-CONF_MIN_CYCLE_DURATION = "min_cycle_duration"
+CONF_MIN_ON_DURATION = "min_on_duration"
+CONF_MIN_OFF_DURATION = "min_off_duration"
 CONF_ECO_ENTITY = "eco_entity"
 CONF_ECO_VALUE = "eco_value"
 
@@ -39,7 +40,8 @@ CONFIG_SCHEMA = vol.Schema(
                         vol.Optional(CONF_TEMP_STEP): vol.Coerce(float),
                         vol.Optional(CONF_TEMP_MIN): vol.Coerce(float),
                         vol.Optional(CONF_TEMP_MAX): vol.Coerce(float),
-                        vol.Optional(CONF_MIN_CYCLE_DURATION): cv.time_period,
+                        vol.Optional(CONF_MIN_ON_DURATION): cv.time_period,
+                        vol.Optional(CONF_MIN_OFF_DURATION): cv.time_period,
                         vol.Optional(CONF_ECO_ENTITY): cv.entity_id,
                         vol.Optional(CONF_ECO_VALUE): cv.string,
                     }
