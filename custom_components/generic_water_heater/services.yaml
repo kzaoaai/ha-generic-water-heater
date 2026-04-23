@@ -18,4 +18,4 @@ set_operation_mode:
       example: "water_heater.water_heater"
     operation_mode:
       description: New value of operation mode.
-      example: "on"
+      example: "electric"

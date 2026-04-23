@@ -1,18 +1,16 @@
 """The generic_water_heater integration."""
 import logging
 
-import voluptuous as vol
-
+from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
-from homeassistant.const import CONF_NAME
-from homeassistant.helpers import discovery
-import homeassistant.helpers.config_validation as cv
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "generic_water_heater"
+PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SWITCH_DOMAIN]
 
 CONF_HEATER = "heater_switch"
 CONF_SENSOR = "temperature_sensor"
@@ -24,60 +22,32 @@ CONF_TEMP_MIN = "min_temp"
 CONF_TEMP_MAX = "max_temp"
 CONF_MIN_ON_DURATION = "min_on_duration"
 CONF_MIN_OFF_DURATION = "min_off_duration"
-CONF_ECO_ENTITY = "eco_entity"
-CONF_ECO_VALUE = "eco_value"
+CONF_ECO_TEMPLATE = "eco_mode_template_condition"
+CONF_DEBUG_LOGGING = "enable_debug_logging"
+CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
 
-CONFIG_SCHEMA = vol.Schema(
-    {
-        DOMAIN: vol.Schema(
-            {
-                cv.slug: vol.Schema(
-                    {
-                        vol.Required(CONF_HEATER): cv.entity_id,
-                        vol.Required(CONF_SENSOR): cv.entity_id,
-                        vol.Optional(CONF_COLD_TOLERANCE): vol.Coerce(float),
-                        vol.Optional(CONF_HOT_TOLERANCE): vol.Coerce(float),
-                        vol.Optional(CONF_TEMP_STEP): vol.Coerce(float),
-                        vol.Optional(CONF_TEMP_MIN): vol.Coerce(float),
-                        vol.Optional(CONF_TEMP_MAX): vol.Coerce(float),
-                        vol.Optional(CONF_MIN_ON_DURATION): cv.time_period,
-                        vol.Optional(CONF_MIN_OFF_DURATION): cv.time_period,
-                        vol.Optional(CONF_ECO_ENTITY): cv.entity_id,
-                        vol.Optional(CONF_ECO_VALUE): cv.string,
-                    }
-                )
-            }
-        )
-    },
-    extra=vol.ALLOW_EXTRA,
-)
+LEGACY_CONF_ECO_ENTITY = "eco_entity"
+LEGACY_CONF_ECO_VALUE = "eco_value"
+
+
+def smart_eco_signal(entry_id: str) -> str:
+    """Return dispatcher signal name for Smart Eco updates."""
+    return f"{DOMAIN}_smart_eco_{entry_id}"
 
 
 async def async_setup(hass, hass_config):
-    """Set up Generic Water Heaters from YAML (keeps backward compatibility)."""
-    if DOMAIN in hass_config:
-        for water_heater, conf in hass_config.get(DOMAIN).items():
-            _LOGGER.debug("Setup %s.%s", DOMAIN, water_heater)
-
-            conf[CONF_NAME] = water_heater
-            hass.async_create_task(
-                discovery.async_load_platform(
-                    hass,
-                    WATER_HEATER_DOMAIN,
-                    DOMAIN,
-                    [conf],
-                    hass_config,
-                )
-            )
+    """Set up the integration."""
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Generic Water Heater from a config entry."""
-    # Forward the config entry to the water_heater platform
-    await hass.config_entries.async_forward_entry_setups(entry, [WATER_HEATER_DOMAIN])
+    hass.data.setdefault(DOMAIN, {})
+    runtime = hass.data[DOMAIN].setdefault(entry.entry_id, {})
+    runtime.setdefault("smart_eco_enabled", None)
 
-    # Register update listener and ensure it's removed on unload to prevent accumulation
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     return True
 
@@ -89,4 +59,50 @@ async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_forward_entry_unload(entry, WATER_HEATER_DOMAIN)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return unload_ok
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries to the current format."""
+    if entry.version >= 3:
+        return True
+
+    _LOGGER.debug("Migrating config entry %s from version %s", entry.entry_id, entry.version)
+
+    new_data = _migrate_legacy_eco_config(entry.data)
+    new_options = _migrate_legacy_eco_config(entry.options)
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data=new_data,
+        options=new_options,
+        version=3,
+    )
+    return True
+
+
+def _migrate_legacy_eco_config(config: dict) -> dict:
+    """Convert legacy eco entity/value settings into a template condition."""
+    updated = dict(config)
+
+    eco_template = updated.get(CONF_ECO_TEMPLATE)
+    eco_entity = updated.pop(LEGACY_CONF_ECO_ENTITY, None)
+    eco_value = updated.pop(LEGACY_CONF_ECO_VALUE, None)
+    updated.pop("map_turn_off_to_eco", None)
+
+    if not eco_template and eco_entity and eco_value not in (None, ""):
+        compare_value = str(eco_value or "")
+        updated[CONF_ECO_TEMPLATE] = (
+            "{{ states(%r) == %r }}" % (eco_entity, compare_value)
+        )
+
+    if CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR not in updated:
+        updated[CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR] = False
+
+    if CONF_DEBUG_LOGGING not in updated:
+        updated[CONF_DEBUG_LOGGING] = False
+
+    return updated
