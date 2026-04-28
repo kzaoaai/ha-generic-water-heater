@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Generic Water Heater Setup",
-        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating, but still respects Smart Eco if enabled.\n\nSmart Eco is controlled with a dedicated switch entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
@@ -16,11 +16,13 @@
           "min_on_duration": "Minimum On Duration",
           "min_off_duration": "Minimum Off Duration",
           "eco_mode_template_condition": "Smart Eco Template Condition",
+          "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume",
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor"
         },
         "data_description": {
-          "eco_mode_template_condition": "Boolean template used by Smart Eco. When Smart Eco is ON and this template evaluates to false, heating is blocked. When Smart Eco is OFF, this template is ignored.",
+          "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
+          "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption.",
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default."
         }
@@ -31,7 +33,7 @@
     "step": {
       "init": {
         "title": "Generic Water Heater Options",
-        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating, but still respects Smart Eco if enabled.\n\nSmart Eco is controlled with a dedicated switch entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
@@ -44,11 +46,13 @@
           "min_on_duration": "Minimum On Duration",
           "min_off_duration": "Minimum Off Duration",
           "eco_mode_template_condition": "Smart Eco Template Condition",
+          "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume",
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor"
         },
         "data_description": {
-          "eco_mode_template_condition": "Boolean template used by Smart Eco. When Smart Eco is ON and this template evaluates to false, heating is blocked. When Smart Eco is OFF, this template is ignored.",
+          "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
+          "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption.",
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default."
         }

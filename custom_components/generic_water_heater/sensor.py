@@ -15,14 +15,17 @@ from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, EventStateChangedData, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
+    CONF_ECO_TEMPLATE,
     CONF_HEATER,
     CONF_SENSOR,
     DOMAIN,
+    smart_eco_state_signal,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,8 +90,9 @@ class MaxTemperatureHistoryStoredData(SensorExtraStoredData):
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the 7-day max temperature sensor from a config entry."""
     data = {**entry.data, **getattr(entry, "options", {})}
-    if not data.get(CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR, False):
-        return
+    eco_template = (data.get(CONF_ECO_TEMPLATE) or "").strip() or None
+
+    entities = []
 
     heater_entity_id = data.get(CONF_HEATER)
     source_sensor_entity_id = data.get(CONF_SENSOR)
@@ -104,16 +108,77 @@ async def async_setup_entry(hass, entry, async_add_entities):
         if device_entry:
             device_identifiers = device_entry.identifiers
 
-    async_add_entities(
-        [
+    if eco_template is not None:
+        entities.append(
+            SmartEcoStateSensor(
+                hass=hass,
+                entry_id=entry.entry_id,
+                name=name,
+                runtime=hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {}),
+                device_identifiers=device_identifiers,
+            )
+        )
+
+    if data.get(CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR, False):
+        entities.append(
             MaxTemperatureHistorySensor(
                 name=name,
                 source_sensor_entity_id=source_sensor_entity_id,
                 device_identifier=entry.entry_id,
                 device_identifiers=device_identifiers,
             )
-        ]
-    )
+        )
+
+    if entities:
+        async_add_entities(entities)
+
+
+class SmartEcoStateSensor(SensorEntity):
+    """Expose Smart Eco policy state."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Smart Eco State"
+
+    def __init__(self, hass, entry_id: str, name: str | None, runtime: dict, device_identifiers):
+        """Initialize Smart Eco state sensor."""
+        self.hass = hass
+        self._entry_id = entry_id
+        self._runtime = runtime
+        self._device_identifiers = device_identifiers
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_smart_eco_state"
+
+        if not device_identifiers and name:
+            self._attr_name = f"{name} Smart Eco State"
+            self._attr_has_entity_name = False
+
+    @property
+    def native_value(self):
+        """Return Smart Eco state label."""
+        return self._runtime.get("smart_eco_state", "Off")
+
+    @property
+    def device_info(self):
+        """Return device information for device registry."""
+        if self._device_identifiers:
+            return {"identifiers": self._device_identifiers}
+
+        return {"identifiers": {(DOMAIN, self._entry_id)}}
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Smart Eco state updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                smart_eco_state_signal(self._entry_id),
+                self._async_handle_smart_eco_state_signal,
+            )
+        )
+
+    def _async_handle_smart_eco_state_signal(self, _payload) -> None:
+        """Handle Smart Eco state updates."""
+        self.schedule_update_ha_state()
 
 
 class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):

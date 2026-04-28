@@ -2,6 +2,7 @@
 import logging
 from datetime import timedelta
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.water_heater import (
     DEFAULT_MIN_TEMP,
     DEFAULT_MAX_TEMP,
@@ -46,6 +47,7 @@ from . import (
     CONF_ECO_TEMPLATE,
     CONF_HEATER,
     CONF_HOT_TOLERANCE,
+    CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_MIN_OFF_DURATION,
     CONF_MIN_ON_DURATION,
     CONF_SENSOR,
@@ -54,7 +56,12 @@ from . import (
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
     DOMAIN,
+    SMART_ECO_MODE_ALWAYS_ON,
+    SMART_ECO_MODE_AUTO_RESUME,
+    SMART_ECO_MODE_OFF,
+    SMART_ECO_MODE_UNTIL_MANUAL,
     smart_eco_signal,
+    smart_eco_state_signal,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,11 +86,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     min_off_duration = data.get(CONF_MIN_OFF_DURATION, data.get("min_cycle_duration"))
     eco_template = (data.get(CONF_ECO_TEMPLATE) or "").strip() or None
     debug_logging = data.get(CONF_DEBUG_LOGGING, False)
+    manual_off_resume_hours = data.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
     unit = hass.config.units.temperature_unit
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-    if runtime.get("smart_eco_enabled") is None:
-        # Smart Eco defaults to enabled when a template exists; otherwise disabled.
-        runtime["smart_eco_enabled"] = eco_template is not None
+    if runtime.get("smart_eco_mode") is None:
+        # Smart Eco defaults to auto-resume policy when a template exists; otherwise Off.
+        runtime["smart_eco_mode"] = SMART_ECO_MODE_AUTO_RESUME if eco_template is not None else SMART_ECO_MODE_OFF
+    runtime.setdefault("smart_eco_pause_reason", None)
+    runtime.setdefault("smart_eco_resume_at", None)
+    runtime.setdefault("smart_eco_last_heating_mode", STATE_ELECTRIC)
+    runtime.setdefault("smart_eco_state", "Off")
 
     registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
@@ -132,6 +144,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         debug_logging,
         unit,
         runtime,
+        manual_off_resume_hours,
         config_entry_id=entry.entry_id,
         device_identifiers=device_identifiers,
     )
@@ -167,6 +180,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         debug_logging,
         unit,
         runtime,
+        manual_off_resume_hours,
         config_entry_id=None,
         device_identifiers=None,
     ):
@@ -186,7 +200,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._min_off_duration = min_off_duration if min_off_duration else timedelta(seconds=120)
         self._eco_template = Template(eco_template, hass) if eco_template else None
         self._runtime = runtime
-        self._smart_eco_enabled = bool(runtime.get("smart_eco_enabled", eco_template is not None))
+        self._smart_eco_mode = runtime.get("smart_eco_mode", SMART_ECO_MODE_OFF)
+        self._smart_eco_pause_reason = runtime.get("smart_eco_pause_reason")
+        self._smart_eco_resume_at = runtime.get("smart_eco_resume_at")
+        self._smart_eco_last_heating_mode = runtime.get("smart_eco_last_heating_mode", STATE_ELECTRIC)
+        self._smart_eco_manual_off_resume_hours = int(manual_off_resume_hours)
+        self._smart_eco_idle_since = None
+        self._smart_eco_resume_timer = None
+        self._smart_eco_countdown_timer = None
         self._debug_logging = bool(debug_logging)
         self._eco_condition_met = False
         self._unit_of_measurement = unit
@@ -231,7 +252,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         """Return the optional state attributes."""
         return {
             "hvac_action": self.hvac_action,
-            "smart_eco_enabled": self._smart_eco_enabled,
+            "smart_eco_mode": self._smart_eco_mode,
+            "smart_eco_pause_reason": self._smart_eco_pause_reason,
+            "smart_eco_resume_at": self._smart_eco_resume_at,
+            "smart_eco_last_heating_mode": self._smart_eco_last_heating_mode,
+            "smart_eco_state": self._runtime.get("smart_eco_state", "Off"),
             "smart_eco_condition_met": self._eco_condition_met,
         }
 
@@ -300,6 +325,43 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
     async def async_set_operation_mode(self, operation_mode):
         """Set new operation mode."""
         old_mode = self._current_operation
+
+        if operation_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
+            self._smart_eco_last_heating_mode = operation_mode
+            self._runtime["smart_eco_last_heating_mode"] = operation_mode
+
+        is_heating_boundary_change = (
+            operation_mode == STATE_OFF
+            or (
+                old_mode == STATE_OFF
+                and operation_mode in (STATE_ELECTRIC, STATE_PERFORMANCE)
+            )
+        )
+
+        if self._eco_template is not None and old_mode != operation_mode and is_heating_boundary_change:
+            if self._smart_eco_mode == SMART_ECO_MODE_AUTO_RESUME:
+                await self._async_pause_smart_eco_for_manual_override(
+                    "manual_off" if operation_mode == STATE_OFF else "manual_on",
+                    source="operation_mode",
+                )
+            elif (
+                self._smart_eco_mode == SMART_ECO_MODE_UNTIL_MANUAL
+                and self._smart_eco_pause_reason is None
+            ):
+                await self._async_pause_smart_eco_for_manual_override(
+                    "manual_off" if operation_mode == STATE_OFF else "manual_on",
+                    source="operation_mode",
+                )
+
+        if (
+            operation_mode == STATE_OFF
+            and self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON
+            and self._eco_template is not None
+        ):
+            self._debug_log("ignoring manual OFF operation while Smart Eco mode is Always ON")
+            await self._async_control_heating()
+            return
+
         self._current_operation = operation_mode
         _LOGGER.debug("%s: async_set_operation_mode -> mode=%s", self.name, self._current_operation)
         if old_mode != operation_mode:
@@ -308,13 +370,49 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_turn_on(self, **kwargs):
         """Turn the entity on."""
-        await self.async_set_smart_eco_enabled(False, source="turn_on", recalculate=False)
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._eco_template is not None:
+            self._debug_log("ignoring manual turn_on while Smart Eco mode is Always ON")
+            await self._async_control_heating()
+            return
+
+        await self._async_pause_smart_eco_for_manual_override("manual_on", source="turn_on")
         await self.async_set_operation_mode(STATE_ELECTRIC)
 
     async def async_turn_off(self, **kwargs):
         """Turn the entity off."""
-        await self.async_set_smart_eco_enabled(False, source="turn_off", recalculate=False)
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._eco_template is not None:
+            self._debug_log("ignoring manual turn_off while Smart Eco mode is Always ON")
+            await self._async_control_heating()
+            return
+
+        await self._async_pause_smart_eco_for_manual_override("manual_off", source="turn_off")
         await self.async_set_operation_mode(STATE_OFF)
+
+    async def async_set_smart_eco_mode(
+        self,
+        mode: str,
+        source: str,
+        recalculate: bool = True,
+    ) -> None:
+        """Set Smart Eco policy mode."""
+        if mode not in (SMART_ECO_MODE_OFF, SMART_ECO_MODE_UNTIL_MANUAL, SMART_ECO_MODE_AUTO_RESUME, SMART_ECO_MODE_ALWAYS_ON):
+            return
+
+        if self._smart_eco_mode == mode and self._smart_eco_pause_reason is None:
+            return
+
+        self._smart_eco_mode = mode
+        self._runtime["smart_eco_mode"] = mode
+        self._clear_smart_eco_pause_state()
+        self._debug_log("smart eco changed: mode=%s (source=%s)", mode, source)
+        self._update_smart_eco_state()
+        async_dispatcher_send(self.hass, smart_eco_signal(self._device_identifier), mode)
+        async_dispatcher_send(self.hass, smart_eco_state_signal(self._device_identifier), self._runtime.get("smart_eco_state"))
+        select_entity = self._runtime.get("smart_eco_select_entity")
+        if select_entity is not None:
+            select_entity.async_write_ha_state()
+        if recalculate:
+            await self._async_control_heating()
 
     async def async_set_smart_eco_enabled(
         self,
@@ -322,19 +420,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         source: str,
         recalculate: bool = True,
     ) -> None:
-        """Enable/disable Smart Eco policy."""
-        if self._smart_eco_enabled == enabled:
-            return
-
-        self._smart_eco_enabled = enabled
-        self._runtime["smart_eco_enabled"] = enabled
-        self._debug_log("smart eco changed: enabled=%s (source=%s)", enabled, source)
-        async_dispatcher_send(self.hass, smart_eco_signal(self._device_identifier), enabled)
-        switch_entity = self._runtime.get("smart_eco_switch_entity")
-        if switch_entity is not None:
-            switch_entity.async_write_ha_state()
-        if recalculate:
-            await self._async_control_heating()
+        """Backwards compatible bridge from legacy on/off Smart Eco callers."""
+        mode = SMART_ECO_MODE_AUTO_RESUME if enabled else SMART_ECO_MODE_OFF
+        await self.async_set_smart_eco_mode(mode, source=source, recalculate=recalculate)
 
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
@@ -373,10 +461,30 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
             if self._current_operation not in self._operation_list:
                 self._current_operation = STATE_OFF
-            restored_smart_eco = old_state.attributes.get("smart_eco_enabled")
-            if isinstance(restored_smart_eco, bool):
-                self._smart_eco_enabled = restored_smart_eco
-                self._runtime["smart_eco_enabled"] = restored_smart_eco
+            restored_mode = old_state.attributes.get("smart_eco_mode")
+            if restored_mode in (SMART_ECO_MODE_OFF, SMART_ECO_MODE_UNTIL_MANUAL, SMART_ECO_MODE_AUTO_RESUME, SMART_ECO_MODE_ALWAYS_ON):
+                self._smart_eco_mode = restored_mode
+                self._runtime["smart_eco_mode"] = restored_mode
+            else:
+                restored_smart_eco = old_state.attributes.get("smart_eco_enabled")
+                if isinstance(restored_smart_eco, bool):
+                    self._smart_eco_mode = SMART_ECO_MODE_AUTO_RESUME if restored_smart_eco else SMART_ECO_MODE_OFF
+                    self._runtime["smart_eco_mode"] = self._smart_eco_mode
+
+            restored_pause_reason = old_state.attributes.get("smart_eco_pause_reason")
+            if isinstance(restored_pause_reason, str):
+                self._smart_eco_pause_reason = restored_pause_reason
+                self._runtime["smart_eco_pause_reason"] = restored_pause_reason
+
+            restored_resume_at = old_state.attributes.get("smart_eco_resume_at")
+            if isinstance(restored_resume_at, str):
+                self._smart_eco_resume_at = restored_resume_at
+                self._runtime["smart_eco_resume_at"] = restored_resume_at
+
+            restored_last_heating_mode = old_state.attributes.get("smart_eco_last_heating_mode")
+            if restored_last_heating_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
+                self._smart_eco_last_heating_mode = restored_last_heating_mode
+                self._runtime["smart_eco_last_heating_mode"] = restored_last_heating_mode
         
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
@@ -397,7 +505,22 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._attr_available = True
             self._last_commanded_switch_state = heater_switch.state
 
+        if self._smart_eco_pause_reason == "manual_off_timer" and self._smart_eco_resume_at:
+            resume_at = dt_util.parse_datetime(self._smart_eco_resume_at)
+            if resume_at is not None:
+                remaining = (resume_at - dt_util.utcnow()).total_seconds()
+                if remaining > 0:
+                    self._smart_eco_resume_timer = async_call_later(
+                        self.hass,
+                        remaining,
+                        self._async_resume_smart_eco_from_timer,
+                    )
+                    self._schedule_smart_eco_countdown_tick()
+                else:
+                    self._clear_smart_eco_pause_state()
+
         self._async_refresh_eco_condition()
+        self._update_smart_eco_state()
         await self._async_control_heating()
         self.async_write_ha_state()
 
@@ -476,7 +599,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if event:
             self.async_set_context(event.context)
 
-        if self._smart_eco_enabled:
+        self._update_smart_eco_state()
+        self.async_write_ha_state()
+
+        if self._is_smart_eco_enforcing():
             await self._async_control_heating()
 
     @callback
@@ -549,16 +675,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 self._pending_switch_state = None
 
         self._debug_log_hvac_action("switch state update")
+        self._update_smart_eco_state()
         self.async_write_ha_state()
 
     async def _async_handle_manual_switch_override(self, new_switch_state: str) -> None:
         """Translate manual switch actions into operation mode intent."""
         self._debug_log("=== manual override detected: new_state=%s, current_mode=%s ===", new_switch_state, self._current_operation)
+
         # Keep the command baseline aligned with the observed physical switch state.
         # Without this, a manual ON path that does not remap mode can leave a stale
         # baseline (e.g. still OFF), causing subsequent manual OFF events to be ignored.
         self._last_commanded_switch_state = new_switch_state
-        await self.async_set_smart_eco_enabled(False, source="manual_switch", recalculate=False)
+        await self._async_pause_smart_eco_for_manual_override(
+            "manual_on" if new_switch_state == STATE_ON else "manual_off",
+            source="manual_switch",
+        )
 
         if new_switch_state == STATE_ON:
             if self._current_operation == STATE_OFF:
@@ -624,6 +755,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._target_temperature - self._cold_tolerance
         )
 
+    def _smart_eco_logical_heating_active(self) -> bool:
+        """Return whether the water heater entity is logically requesting heat."""
+        if self._current_operation == STATE_PERFORMANCE:
+            return True
+
+        if self._current_operation == STATE_ELECTRIC:
+            return self._electric_mode_wants_heating()
+
+        return False
+
     def _debug_log(self, message: str, *args) -> None:
         """Log debug diagnostics when debug mode is enabled."""
         if not self._debug_logging:
@@ -649,6 +790,232 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         """Log manual override decision details when debug mode is enabled."""
         self._debug_log(message, *args)
 
+    def _is_smart_eco_enforcing(self) -> bool:
+        """Return whether Smart Eco policy is currently enforcing heater control."""
+        return (
+            self._eco_template is not None
+            and self._smart_eco_mode in (SMART_ECO_MODE_UNTIL_MANUAL, SMART_ECO_MODE_AUTO_RESUME, SMART_ECO_MODE_ALWAYS_ON)
+            and self._smart_eco_pause_reason is None
+        )
+
+    def _clear_smart_eco_pause_state(self) -> None:
+        """Clear Smart Eco pause flags and timers."""
+        self._smart_eco_pause_reason = None
+        self._smart_eco_resume_at = None
+        self._smart_eco_idle_since = None
+        self._runtime["smart_eco_pause_reason"] = None
+        self._runtime["smart_eco_resume_at"] = None
+
+        if self._smart_eco_resume_timer is not None:
+            self._smart_eco_resume_timer()
+            self._smart_eco_resume_timer = None
+
+        if self._smart_eco_countdown_timer is not None:
+            self._smart_eco_countdown_timer()
+            self._smart_eco_countdown_timer = None
+
+        persistent_notification.async_dismiss(
+            self.hass,
+            self._always_on_override_notification_id,
+        )
+
+    @property
+    def _always_on_override_notification_id(self) -> str:
+        """Return persistent notification id for Always ON temporary overrides."""
+        return f"{DOMAIN}_{self._device_identifier}_always_on_override"
+
+    def _start_manual_override_countdown(self, action: str, source: str) -> None:
+        """Start a Smart Eco temporary override countdown using configured delay."""
+        self._clear_smart_eco_pause_state()
+        self._smart_eco_pause_reason = "manual_off_timer"
+        resume_at = dt_util.utcnow() + timedelta(hours=self._smart_eco_manual_off_resume_hours)
+        self._smart_eco_resume_at = resume_at.isoformat()
+        self._runtime["smart_eco_pause_reason"] = self._smart_eco_pause_reason
+        self._runtime["smart_eco_resume_at"] = self._smart_eco_resume_at
+        self._smart_eco_resume_timer = async_call_later(
+            self.hass,
+            self._smart_eco_manual_off_resume_hours * 3600,
+            self._async_resume_smart_eco_from_timer,
+        )
+        self._schedule_smart_eco_countdown_tick()
+        self._debug_log(
+            "smart eco paused by manual control for %sh (action=%s, source=%s)",
+            self._smart_eco_manual_off_resume_hours,
+            action,
+            source,
+        )
+
+    def _notify_always_on_override_started(self, action: str) -> None:
+        """Create a clear notification when Always ON enters temporary override."""
+        persistent_notification.async_create(
+            self.hass,
+            (
+                "Smart Eco Mode is set to Always ON. A manual switch change was detected "
+                f"({action.upper()}) on the underlying heater switch. Policy enforcement is "
+                f"temporarily paused and will automatically resume in {self._smart_eco_manual_off_resume_hours} hour(s)."
+            ),
+            title="Smart Eco Mode Temporary Override",
+            notification_id=self._always_on_override_notification_id,
+        )
+
+    def _notify_always_on_override_resumed(self) -> None:
+        """Notify when Always ON policy enforcement has resumed."""
+        persistent_notification.async_create(
+            self.hass,
+            "Smart Eco Mode Always ON has resumed policy enforcement after the temporary manual override period.",
+            title="Smart Eco Mode Resumed",
+            notification_id=self._always_on_override_notification_id,
+        )
+
+    def _format_resume_countdown_state(self) -> str:
+        """Return a human-readable countdown state label."""
+        if not self._smart_eco_resume_at:
+            return "Paused by manual control"
+
+        resume_at = dt_util.parse_datetime(self._smart_eco_resume_at)
+        if resume_at is None:
+            return "Paused by manual control"
+
+        remaining = resume_at - dt_util.utcnow()
+        remaining_seconds = max(0, int(remaining.total_seconds()))
+        hours = remaining_seconds // 3600
+        minutes = (remaining_seconds % 3600) // 60
+        return f"Resuming in {hours:02d}H {minutes:02d}M"
+
+    def _update_smart_eco_state(self) -> None:
+        """Calculate and publish Smart Eco state label."""
+        if self._smart_eco_mode == SMART_ECO_MODE_OFF or self._eco_template is None:
+            state = "Off"
+        elif self._smart_eco_pause_reason == "until_manual":
+            state = "Stopped by manual control"
+        elif self._smart_eco_pause_reason == "manual_off_timer":
+            countdown_state = self._format_resume_countdown_state()
+            if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON:
+                state = f"Always ON override ({countdown_state})"
+            else:
+                state = countdown_state
+        elif self._smart_eco_pause_reason == "manual_on_wait_idle":
+            state = "Paused by manual control"
+        elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
+            state = "Blocked by eco condition"
+        elif self._eco_condition_met and self._smart_eco_logical_heating_active():
+            state = "Heating in eco"
+        else:
+            state = "Idle"
+
+        self._runtime["smart_eco_state"] = state
+        async_dispatcher_send(self.hass, smart_eco_state_signal(self._device_identifier), state)
+
+    def _schedule_smart_eco_countdown_tick(self) -> None:
+        """Schedule periodic countdown state refresh while waiting to resume."""
+        if self._smart_eco_pause_reason != "manual_off_timer":
+            return
+
+        if self._smart_eco_countdown_timer is not None:
+            self._smart_eco_countdown_timer()
+
+        self._smart_eco_countdown_timer = async_call_later(
+            self.hass,
+            60,
+            self._async_smart_eco_countdown_tick,
+        )
+
+    async def _async_smart_eco_countdown_tick(self, _now) -> None:
+        """Refresh countdown state and reschedule while timer is active."""
+        self._smart_eco_countdown_timer = None
+        self._update_smart_eco_state()
+        self.async_write_ha_state()
+        if self._smart_eco_pause_reason == "manual_off_timer":
+            self._schedule_smart_eco_countdown_tick()
+
+    async def _async_resume_smart_eco_from_timer(self, _now) -> None:
+        """Resume Smart Eco when the manual OFF delay expires."""
+        self._smart_eco_resume_timer = None
+        if self._smart_eco_mode not in (SMART_ECO_MODE_AUTO_RESUME, SMART_ECO_MODE_ALWAYS_ON) or self._smart_eco_pause_reason != "manual_off_timer":
+            return
+
+        self._debug_log("smart eco resume timer elapsed; resuming policy control")
+        self._clear_smart_eco_pause_state()
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON:
+            self._notify_always_on_override_resumed()
+        self._update_smart_eco_state()
+        await self._async_control_heating()
+
+    def _async_check_manual_on_resume(self) -> None:
+        """Resume Smart Eco after manual ON once target has been satisfied for 60s."""
+        if self._smart_eco_pause_reason != "manual_on_wait_idle" or self._smart_eco_mode != SMART_ECO_MODE_AUTO_RESUME:
+            return
+
+        now = dt_util.utcnow()
+        if self.hvac_action == "idle" and self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE):
+            if self._smart_eco_idle_since is None:
+                self._smart_eco_idle_since = now
+                if self._smart_eco_resume_timer is not None:
+                    self._smart_eco_resume_timer()
+                self._smart_eco_resume_timer = async_call_later(
+                    self.hass,
+                    60,
+                    self._async_resume_smart_eco_after_idle,
+                )
+                return
+
+        self._smart_eco_idle_since = None
+
+    async def _async_resume_smart_eco_after_idle(self, _now) -> None:
+        """Resume Smart Eco after sustained idle following manual ON override."""
+        self._smart_eco_resume_timer = None
+        if self._smart_eco_pause_reason != "manual_on_wait_idle" or self._smart_eco_mode != SMART_ECO_MODE_AUTO_RESUME:
+            return
+
+        if self.hvac_action == "idle" and self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE):
+            self._debug_log("manual ON override satisfied; resuming Smart Eco policy")
+            self._clear_smart_eco_pause_state()
+            self._update_smart_eco_state()
+            await self._async_control_heating()
+            return
+
+        self._async_check_manual_on_resume()
+
+    async def _async_pause_smart_eco_for_manual_override(self, action: str, source: str) -> None:
+        """Pause or stop Smart Eco according to current policy mode and override action."""
+        if self._smart_eco_mode == SMART_ECO_MODE_OFF or self._eco_template is None:
+            return
+
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON:
+            if source != "manual_switch":
+                self._debug_log("manual override ignored by Always ON policy (source=%s)", source)
+                return
+
+            self._start_manual_override_countdown(action, source)
+            self._notify_always_on_override_started(action)
+            self._update_smart_eco_state()
+            async_dispatcher_send(self.hass, smart_eco_signal(self._device_identifier), self._smart_eco_mode)
+            return
+
+        if self._smart_eco_mode == SMART_ECO_MODE_UNTIL_MANUAL:
+            self._smart_eco_pause_reason = "until_manual"
+            self._runtime["smart_eco_pause_reason"] = self._smart_eco_pause_reason
+            self._runtime["smart_eco_resume_at"] = None
+            self._debug_log("smart eco stopped by manual control (source=%s)", source)
+            self._update_smart_eco_state()
+            async_dispatcher_send(self.hass, smart_eco_signal(self._device_identifier), self._smart_eco_mode)
+            return
+
+        # Auto-resume mode pause behavior.
+        # For manual switch toggles (e.g. smart breaker), always restart the countdown
+        # from now so policy resumption timing remains predictable for users.
+        if action == "manual_off" or source in ("manual_switch", "operation_mode"):
+            self._start_manual_override_countdown(action, source)
+        else:
+            self._clear_smart_eco_pause_state()
+            self._smart_eco_pause_reason = "manual_on_wait_idle"
+            self._runtime["smart_eco_pause_reason"] = self._smart_eco_pause_reason
+            self._runtime["smart_eco_resume_at"] = None
+            self._debug_log("smart eco paused by manual ON until satisfied (source=%s)", source)
+
+        self._update_smart_eco_state()
+        async_dispatcher_send(self.hass, smart_eco_signal(self._device_identifier), self._smart_eco_mode)
+
     async def _async_control_heating(self):
         """Check if we need to turn heating on or off."""
         _LOGGER.debug(
@@ -662,30 +1029,45 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         )
         _LOGGER.debug("%s: debug_logging flag is: %s", self.name, self._debug_logging)
         self._debug_log(
-            "=== control_heating entry: mode=%s, current_temp=%s, target=%s, smart_eco_enabled=%s, eco_condition_met=%s ===",
+            "=== control_heating entry: mode=%s, current_temp=%s, target=%s, smart_eco_mode=%s, pause_reason=%s, eco_condition_met=%s ===",
             self._current_operation,
             self._current_temperature,
             self._target_temperature,
-            self._smart_eco_enabled,
+            self._smart_eco_mode,
+            self._smart_eco_pause_reason,
             self._eco_condition_met,
         )
 
-        # If the water heater mode is explicitly OFF, ensure underlying switch is off
+        smart_eco_active = self._is_smart_eco_enforcing()
+        if smart_eco_active:
+            if not self._eco_condition_met:
+                if self._current_operation != STATE_OFF:
+                    self._debug_log("decision: smart eco blocks heating -> setting operation mode OFF")
+                    self._current_operation = STATE_OFF
+                await self._async_heater_turn_off()
+                self._update_smart_eco_state()
+                self._debug_log_hvac_action("smart eco blocked")
+                self.async_write_ha_state()
+                return
+
+            if self._current_operation == STATE_OFF:
+                desired_heating_mode = self._smart_eco_last_heating_mode
+                if desired_heating_mode not in (STATE_ELECTRIC, STATE_PERFORMANCE):
+                    desired_heating_mode = STATE_ELECTRIC
+                self._debug_log(
+                    "decision: smart eco allows heating -> restoring heating mode %s",
+                    desired_heating_mode,
+                )
+                self._current_operation = desired_heating_mode
+
+        # If the water heater mode is explicitly OFF (and Smart Eco did not restore a heating mode),
+        # ensure underlying switch is off.
         if self._current_operation == STATE_OFF:
             _LOGGER.debug("%s: operation is OFF, turning underlying switch off", self.name)
             self._debug_log("decision: mode OFF -> switch OFF")
             await self._async_heater_turn_off()
             self._debug_log_hvac_action("mode OFF")
-            self.async_write_ha_state()
-            return
-
-        smart_eco_active = self._smart_eco_enabled and self._eco_template is not None
-        if smart_eco_active and not self._eco_condition_met:
-            self._debug_log(
-                "decision: smart eco blocks heating (template condition false) -> switch OFF",
-            )
-            await self._async_heater_turn_off()
-            self._debug_log_hvac_action("smart eco blocked")
+            self._update_smart_eco_state()
             self.async_write_ha_state()
             return
 
@@ -695,6 +1077,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._debug_log("decision: mode PERFORMANCE -> switch ON")
             await self._async_heater_turn_on()
             self._debug_log_hvac_action("mode PERFORMANCE")
+            self._update_smart_eco_state()
             self.async_write_ha_state()
             return
 
@@ -736,6 +1119,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._debug_log("decision: within hysteresis band [%.1f, %.1f], maintaining current state", lower_threshold, upper_threshold)
 
         self._debug_log_hvac_action("hysteresis control")
+        if self._smart_eco_pause_reason == "manual_on_wait_idle":
+            self._async_check_manual_on_resume()
+        self._update_smart_eco_state()
         self.async_write_ha_state()
 
     async def _async_control_heating_callback(self, _now):

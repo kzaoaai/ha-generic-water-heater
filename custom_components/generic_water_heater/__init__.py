@@ -2,7 +2,7 @@
 import logging
 
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
-from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
+from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "generic_water_heater"
-PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SWITCH_DOMAIN]
+PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SELECT_DOMAIN]
 
 CONF_HEATER = "heater_switch"
 CONF_SENSOR = "temperature_sensor"
@@ -25,6 +25,12 @@ CONF_MIN_OFF_DURATION = "min_off_duration"
 CONF_ECO_TEMPLATE = "eco_mode_template_condition"
 CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
+CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS = "smart_eco_manual_off_resume_hours"
+
+SMART_ECO_MODE_OFF = "off"
+SMART_ECO_MODE_UNTIL_MANUAL = "until_manual"
+SMART_ECO_MODE_AUTO_RESUME = "auto_resume"
+SMART_ECO_MODE_ALWAYS_ON = "always_on"
 
 LEGACY_CONF_ECO_ENTITY = "eco_entity"
 LEGACY_CONF_ECO_VALUE = "eco_value"
@@ -33,6 +39,11 @@ LEGACY_CONF_ECO_VALUE = "eco_value"
 def smart_eco_signal(entry_id: str) -> str:
     """Return dispatcher signal name for Smart Eco updates."""
     return f"{DOMAIN}_smart_eco_{entry_id}"
+
+
+def smart_eco_state_signal(entry_id: str) -> str:
+    """Return dispatcher signal name for Smart Eco state updates."""
+    return f"{DOMAIN}_smart_eco_state_{entry_id}"
 
 
 async def async_setup(hass, hass_config):
@@ -44,7 +55,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Generic Water Heater from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     runtime = hass.data[DOMAIN].setdefault(entry.entry_id, {})
-    runtime.setdefault("smart_eco_enabled", None)
+    runtime.setdefault("smart_eco_mode", None)
+    runtime.setdefault("smart_eco_pause_reason", None)
+    runtime.setdefault("smart_eco_resume_at", None)
+    runtime.setdefault("smart_eco_last_heating_mode", None)
+    runtime.setdefault("smart_eco_state", "Off")
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -67,7 +82,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate old config entries to the current format."""
-    if entry.version >= 3:
+    if entry.version >= 4:
         return True
 
     _LOGGER.debug("Migrating config entry %s from version %s", entry.entry_id, entry.version)
@@ -79,7 +94,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry,
         data=new_data,
         options=new_options,
-        version=3,
+        version=4,
     )
     return True
 
@@ -104,5 +119,8 @@ def _migrate_legacy_eco_config(config: dict) -> dict:
 
     if CONF_DEBUG_LOGGING not in updated:
         updated[CONF_DEBUG_LOGGING] = False
+
+    if CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS not in updated:
+        updated[CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS] = 6
 
     return updated

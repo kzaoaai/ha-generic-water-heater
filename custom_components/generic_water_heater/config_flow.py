@@ -12,6 +12,7 @@ from . import (
     CONF_ECO_TEMPLATE,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
     CONF_HEATER,
+        CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_HOT_TOLERANCE,
     CONF_MIN_OFF_DURATION,
     CONF_MIN_ON_DURATION,
@@ -67,6 +68,10 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 description={"suggested_value": _eco_template_default(current)},
             ): selector({"template": {}}),
             vol.Optional(
+                CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
+                default=current.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6),
+            ): selector({"number": {"min": 1, "max": 48, "step": 1, "mode": "slider"}}),
+            vol.Optional(
                 CONF_DEBUG_LOGGING,
                 default=current.get(CONF_DEBUG_LOGGING, False),
             ): selector({"boolean": {}}),
@@ -81,7 +86,7 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
 class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Generic Water Heater."""
 
-    VERSION = 3
+    VERSION = 4
 
     @staticmethod
     def async_get_options_flow(config_entry):
@@ -94,6 +99,7 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             user_input.setdefault(CONF_ECO_TEMPLATE, "")
+            user_input.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
             user_input.setdefault(CONF_DEBUG_LOGGING, False)
             return self.async_create_entry(title=user_input[CONF_NAME], data=user_input)
 
@@ -109,6 +115,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Explicitly persist CONF_ECO_TEMPLATE as "" when cleared so it
             # overrides any value in entry.data when both are merged later.
             user_input.setdefault(CONF_ECO_TEMPLATE, "")
+            user_input.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
             user_input.setdefault(CONF_DEBUG_LOGGING, False)
             return self.async_create_entry(title="", data=user_input)
 

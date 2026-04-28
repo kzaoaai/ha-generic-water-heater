@@ -4,8 +4,8 @@
   "issue_tracker": "https://github.com/kzaoaai/ha_generic_water_heater/issues",
   "codeowners": ["@kzaoaai"],
   "name": "Generic Water Heater",
-  "version": "0.1.0",
-  "dependencies": ["sensor", "switch"],
+  "version": "1.1.0",
+  "dependencies": ["sensor", "select"],
   "config_flow": true,
   "iot_class": "local_push"
 }
