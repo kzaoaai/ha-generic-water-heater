@@ -16,12 +16,18 @@
           "min_on_duration": "Minimum On Duration",
           "min_off_duration": "Minimum Off Duration",
           "eco_mode_template_condition": "Smart Eco Template Condition",
+          "nominal_power_w": "Nominal Power",
+          "fleet_stagger_seconds": "Fleet Stagger",
+          "fleet_power_budget_w": "Fleet Power Budget",
           "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume",
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor"
         },
         "data_description": {
           "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
+          "nominal_power_w": "Nameplate wattage of this heating element, used for fleet load admission. Nameplate is used rather than a power sensor because power sensors poll far too slowly to gate a switch-on decision. Leave at 0 if unknown, but note that a heater with no nominal power is invisible to the fleet power budget. Update this if the element is rewired or its power selector is changed.",
+          "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering.",
+          "fleet_power_budget_w": "Maximum combined nominal power that all Generic Water Heater instances may have switched on at once. 0 disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. A heater is never blocked while no other instance is drawing, so this can only prevent a combined overload, never leave you without hot water entirely.",
           "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption.",
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default."
@@ -46,12 +52,18 @@
           "min_on_duration": "Minimum On Duration",
           "min_off_duration": "Minimum Off Duration",
           "eco_mode_template_condition": "Smart Eco Template Condition",
+          "nominal_power_w": "Nominal Power",
+          "fleet_stagger_seconds": "Fleet Stagger",
+          "fleet_power_budget_w": "Fleet Power Budget",
           "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume",
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor"
         },
         "data_description": {
           "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
+          "nominal_power_w": "Nameplate wattage of this heating element, used for fleet load admission. Nameplate is used rather than a power sensor because power sensors poll far too slowly to gate a switch-on decision. Leave at 0 if unknown, but note that a heater with no nominal power is invisible to the fleet power budget. Update this if the element is rewired or its power selector is changed.",
+          "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering.",
+          "fleet_power_budget_w": "Maximum combined nominal power that all Generic Water Heater instances may have switched on at once. 0 disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. A heater is never blocked while no other instance is drawing, so this can only prevent a combined overload, never leave you without hot water entirely.",
           "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption.",
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default."

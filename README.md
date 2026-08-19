@@ -11,6 +11,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
 - Always ON temporary override behavior for manual underlying switch changes, with countdown state and persistent notifications.
 - Minimum on and off durations to avoid rapid switching.
+- Fleet load coordination across every instance, so several heaters cannot step onto a shared inverter or generator at the same moment.
 - Failsafe shutdown when the temperature sensor becomes unavailable.
 - Automatic device linking to the same device as the controlled switch when possible.
 
@@ -63,8 +64,71 @@ This integration is configured from the Home Assistant UI.
 | `min_on_duration` | duration | `0 seconds` | Minimum time the heater must stay on before it can be turned off. |
 | `min_off_duration` | duration | `120 seconds` | Minimum time the heater must stay off before it can be turned on. |
 | `eco_mode_template_condition` | template | empty | Boolean template used by Smart Eco policy. If empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
+| `nominal_power_w` | number | `0` | Nameplate power of this heating element, in watts. Used for fleet load admission. `0` means unknown, which makes this heater invisible to the fleet power budget. |
+| `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
+| `fleet_power_budget_w` | number | `0` | Maximum combined nominal power all instances may have switched on at once. `0` disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. |
 | `smart_eco_manual_off_resume_hours` | number (slider) | `6` | Auto-resume/override duration in hours (range: `1` to `48`). Used by Auto Resume after Delay and Always ON temporary override countdowns. |
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
+
+## Fleet Load Coordination
+
+Several instances driven by one shared condition -- the same Smart Eco template, for example -- all
+react in the same Home Assistant event-loop pass. Without coordination each one commands its switch
+within milliseconds of its siblings, and a few kW of resistive load arrives as a single step. On an
+inverter or generator sized close to the house load, that step is what trips the supply.
+
+All instances share one coordinator, so they can see each other's commitments the instant they are
+made. Three rules apply, in order, to every switch-on:
+
+1. **Stagger** (`fleet_stagger_seconds`, default 60 s) -- no instance may switch on within N seconds
+   of any other instance's switch-on.
+2. **Nameplate budget** (`fleet_power_budget_w`, default off) -- a switch-on is refused if it would
+   push the combined nominal power of all running instances over the budget.
+3. **Priority** -- when capacity frees up, the heater furthest below its target temperature goes
+   first. If a budget is set that cannot fit every heater at once, requests arriving in the same pass
+   are held for one second so they are ranked by temperature deficit rather than by arrival order.
+
+A refused heater is never skipped: it defers and retries on the same cooldown timer that
+`min_off_duration` uses, and it is woken immediately when a sibling releases capacity.
+
+Two deliberate design choices:
+
+- **Nameplate, not telemetry.** Admission uses the configured `nominal_power_w`, not a power sensor.
+  Power sensors typically poll every 15-60 s, far too slow to gate a decision that has to be made in
+  the same event-loop pass that requested it. Nameplate accounting has zero latency. The trade-off is
+  that `nominal_power_w` must be kept accurate by hand -- update it if an element is rewired or its
+  power selector is moved.
+- **The budget only prevents an aggregate step.** A heater is never blocked while no other instance
+  is drawing, so a budget smaller than a single element cannot leave you with no hot water at all.
+
+Manual switch-ons are counted against the budget too, since they draw real watts. The fleet can only
+ever delay its **own** commands -- it never refuses a human. Flipping the physical switch works
+exactly as before: the override is detected, Smart Eco steps back, and the watts are simply booked.
+
+### Commitments are reconciled, not trusted
+
+A commitment is booked the instant a switch-on is commanded, because waiting for the switch to
+confirm would reintroduce the very latency this feature exists to avoid. That makes every commitment
+a claim about the world, so it is checked against reality rather than trusted forever -- otherwise
+one dead relay would quietly take the whole house's hot water with it:
+
+- A commanded switch that has **not been seen on within 2 minutes** loses its claim, and a warning is
+  logged naming the heater.
+- A switch that has been **unavailable for 10 minutes** loses its claim. It is held at first, because
+  it may still be drawing, but the likelier cause is that the element lost power.
+- An **unloaded config entry** keeps its watts for 60 seconds, because unloading an entry does not
+  switch its heater off. This covers the reload an options save triggers, which would otherwise be
+  the exact moment both elements could come on together.
+- A switch actually **observed on** never expires. It really is drawing.
+
+Whenever a claim lapses, a waiting heater is woken immediately rather than left on its retry timer.
+
+Set `fleet_stagger_seconds` to `0` and leave `fleet_power_budget_w` at `0` on every instance to
+restore the previous uncoordinated behaviour.
+
+Current fleet state is exposed on each water heater entity as the `nominal_power_w`,
+`fleet_committed_power_w`, `fleet_power_budget_w`, `fleet_stagger_seconds` and `fleet_hold_reason`
+attributes. `fleet_hold_reason` names exactly why a heater is currently waiting.
 
 ## Smart Eco Mode
 

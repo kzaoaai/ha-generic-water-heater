@@ -7,6 +7,8 @@ from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .fleet import FLEET_KEY, HeaterFleet
+
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "generic_water_heater"
@@ -23,6 +25,9 @@ CONF_TEMP_MAX = "max_temp"
 CONF_MIN_ON_DURATION = "min_on_duration"
 CONF_MIN_OFF_DURATION = "min_off_duration"
 CONF_ECO_TEMPLATE = "eco_mode_template_condition"
+CONF_NOMINAL_POWER_W = "nominal_power_w"
+CONF_FLEET_STAGGER_SECONDS = "fleet_stagger_seconds"
+CONF_FLEET_POWER_BUDGET_W = "fleet_power_budget_w"
 CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
 CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS = "smart_eco_manual_off_resume_hours"
@@ -34,6 +39,22 @@ SMART_ECO_MODE_ALWAYS_ON = "always_on"
 
 LEGACY_CONF_ECO_ENTITY = "eco_entity"
 LEGACY_CONF_ECO_VALUE = "eco_value"
+
+
+def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:
+    """Return the shared fleet coordinator, creating it on first use.
+
+    The fleet is stored under a reserved key beside the per-entry runtime dicts.
+    Config entry ids are ULIDs, so FLEET_KEY cannot collide with one, and the
+    fleet deliberately outlives the unload of any individual entry -- a sibling
+    that is still running must keep seeing the watts it has committed.
+    """
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    fleet = domain_data.get(FLEET_KEY)
+    if fleet is None:
+        fleet = HeaterFleet()
+        domain_data[FLEET_KEY] = fleet
+    return fleet
 
 
 def smart_eco_signal(entry_id: str) -> str:
@@ -76,8 +97,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        domain_data = hass.data.get(DOMAIN, {})
+        domain_data.pop(entry.entry_id, None)
+
+        # Hand back whatever share of the power budget this entry was holding,
+        # so surviving siblings can use it immediately.
+        fleet = domain_data.get(FLEET_KEY)
+        if fleet is not None:
+            fleet.unregister(entry.entry_id)
+            if fleet.is_empty and not _has_entry_runtime(domain_data):
+                domain_data.pop(FLEET_KEY, None)
     return unload_ok
+
+
+def _has_entry_runtime(domain_data: dict) -> bool:
+    """Return True when any per-entry runtime is still stored."""
+    return any(key != FLEET_KEY for key in domain_data)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

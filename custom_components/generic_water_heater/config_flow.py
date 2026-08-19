@@ -11,7 +11,10 @@ from . import (
     CONF_DEBUG_LOGGING,
     CONF_ECO_TEMPLATE,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
+    CONF_FLEET_POWER_BUDGET_W,
+    CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
+    CONF_NOMINAL_POWER_W,
         CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_HOT_TOLERANCE,
     CONF_MIN_OFF_DURATION,
@@ -24,6 +27,7 @@ from . import (
     LEGACY_CONF_ECO_ENTITY,
     LEGACY_CONF_ECO_VALUE,
 )
+from .fleet import DEFAULT_BUDGET_W, DEFAULT_NOMINAL_POWER_W, DEFAULT_STAGGER_SECONDS
 
 
 def _eco_template_default(config: dict) -> str:
@@ -68,6 +72,24 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 description={"suggested_value": _eco_template_default(current)},
             ): selector({"template": {}}),
             vol.Optional(
+                CONF_NOMINAL_POWER_W,
+                default=current.get(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W),
+            ): selector(
+                {"number": {"min": 0, "max": 20000, "step": 50, "mode": "box", "unit_of_measurement": "W"}}
+            ),
+            vol.Optional(
+                CONF_FLEET_STAGGER_SECONDS,
+                default=current.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS),
+            ): selector(
+                {"number": {"min": 0, "max": 3600, "step": 5, "mode": "box", "unit_of_measurement": "s"}}
+            ),
+            vol.Optional(
+                CONF_FLEET_POWER_BUDGET_W,
+                default=current.get(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W),
+            ): selector(
+                {"number": {"min": 0, "max": 100000, "step": 100, "mode": "box", "unit_of_measurement": "W"}}
+            ),
+            vol.Optional(
                 CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
                 default=current.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6),
             ): selector({"number": {"min": 1, "max": 48, "step": 1, "mode": "slider"}}),
@@ -101,6 +123,9 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input.setdefault(CONF_ECO_TEMPLATE, "")
             user_input.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
             user_input.setdefault(CONF_DEBUG_LOGGING, False)
+            user_input.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
+            user_input.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
+            user_input.setdefault(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
             return self.async_create_entry(title=user_input[CONF_NAME], data=user_input)
 
         return self.async_show_form(step_id="user", data_schema=_build_data_schema(), errors=errors)
@@ -117,6 +142,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             user_input.setdefault(CONF_ECO_TEMPLATE, "")
             user_input.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
             user_input.setdefault(CONF_DEBUG_LOGGING, False)
+            user_input.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
+            user_input.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
+            user_input.setdefault(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
             return self.async_create_entry(title="", data=user_input)
 
         current = {**self.config_entry.data, **self.config_entry.options}
