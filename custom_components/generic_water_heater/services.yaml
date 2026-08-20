@@ -19,3 +19,29 @@ set_operation_mode:
     operation_mode:
       description: New value of operation mode.
       example: "electric"
+
+shed:
+  name: Shed for load balancing
+  description: >-
+    Drop this water heater for load shedding without disturbing user intent.
+    Intended for an external load balancer to call instead of set_operation_mode,
+    so the request is never mistaken for a person operating the heater. The
+    operation mode and Smart Eco policy are left untouched, so releasing the shed
+    resumes exactly what was configured. Outranks Smart Eco "Always ON", because
+    shedding protects the electrical supply rather than expressing a preference.
+    A person asking for heat clears the shed.
+  target:
+    entity:
+      integration: generic_water_heater
+      domain: water_heater
+
+release:
+  name: Release load shed
+  description: >-
+    Release a load shed previously applied with the shed service and resume the
+    operation mode and Smart Eco policy the heater already had. Does nothing if
+    the heater is not shed.
+  target:
+    entity:
+      integration: generic_water_heater
+      domain: water_heater

@@ -31,6 +31,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_template_result,
 )
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -59,6 +60,8 @@ from . import (
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
     DOMAIN,
+    SERVICE_RELEASE,
+    SERVICE_SHED,
     SMART_ECO_MODE_ALWAYS_ON,
     SMART_ECO_MODE_AUTO_RESUME,
     SMART_ECO_MODE_OFF,
@@ -161,6 +164,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
     runtime["water_heater_entity"] = entity
     async_add_entities([entity])
+
+    # Entity services an external load balancer calls instead of
+    # set_operation_mode, so shedding is never mistaken for a person.
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(SERVICE_SHED, None, "async_load_shed")
+    platform.async_register_entity_service(SERVICE_RELEASE, None, "async_load_release")
     return True
 
 
@@ -248,6 +257,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._fleet_power_budget_w = fleet_power_budget_w
         self._fleet = async_get_fleet(hass)
         self._fleet_hold_reason = None
+        # Load shedding is a third axis, deliberately independent of both the
+        # operation mode and Smart Eco policy: an external load balancer must be
+        # able to drop this element without its request being mistaken for a
+        # person's, and without disturbing the policy the user chose.
+        self._load_shed = False
         # device/unique id
         # prefer config_entry_id (when created via UI) otherwise fall back to heater entity id
         self._device_identifier = config_entry_id or heater_entity_id
@@ -285,6 +299,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "fleet_power_budget_w": self._fleet.budget_w,
             "fleet_stagger_seconds": self._fleet.stagger_seconds,
             "fleet_hold_reason": self._fleet_hold_reason,
+            "load_shed": self._load_shed,
         }
 
     @property
@@ -350,10 +365,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         await self._async_control_heating()
 
     async def async_set_operation_mode(self, operation_mode):
-        """Set new operation mode."""
+        """Set new operation mode.
+
+        Now that an external load balancer uses the shed/release services, a
+        call landing here is unambiguously a person, so it is safe to treat as
+        manual intent.
+        """
         old_mode = self._current_operation
 
         if operation_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
+            self._clear_load_shed("set_operation_mode")
             self._smart_eco_last_heating_mode = operation_mode
             self._runtime["smart_eco_last_heating_mode"] = operation_mode
 
@@ -402,6 +423,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             await self._async_control_heating()
             return
 
+        self._clear_load_shed("turn_on")
         await self._async_pause_smart_eco_for_manual_override("manual_on", source="turn_on")
         await self.async_set_operation_mode(STATE_ELECTRIC)
 
@@ -414,6 +436,50 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         await self._async_pause_smart_eco_for_manual_override("manual_off", source="turn_off")
         await self.async_set_operation_mode(STATE_OFF)
+
+    async def async_load_shed(self) -> None:
+        """Drop this heater for load shedding, without touching user intent.
+
+        Called by an external load balancer instead of set_operation_mode, so
+        the request is never mistaken for a person at the wall. Smart Eco policy
+        is deliberately left exactly as it was -- no pause, no countdown, no
+        notification -- so releasing the shed resumes what the user had.
+        """
+        if self._load_shed:
+            return
+
+        _LOGGER.debug("%s: load shed requested", self.name)
+        self._debug_log("load shed: engaged (mode=%s)", self._current_operation)
+        self._load_shed = True
+        await self._async_control_heating()
+        self.async_write_ha_state()
+
+    async def async_load_release(self) -> None:
+        """Release a load shed and resume whatever the user had configured."""
+        if not self._load_shed:
+            return
+
+        _LOGGER.debug("%s: load shed released", self.name)
+        self._debug_log("load shed: released (mode=%s)", self._current_operation)
+        self._load_shed = False
+        await self._async_control_heating()
+        self.async_write_ha_state()
+
+    @callback
+    def _clear_load_shed(self, source: str) -> bool:
+        """Clear a shed because a person asked for heat. Returns True if cleared.
+
+        Only requests for heat clear a shed. A request to turn the heater off
+        has nothing to win -- it is already off -- and clearing on it would let
+        an ignored OFF (Smart Eco Always ON) switch the element back on.
+        """
+        if not self._load_shed:
+            return False
+
+        _LOGGER.debug("%s: load shed cleared by %s", self.name, source)
+        self._debug_log("load shed: cleared by %s (human intent wins)", source)
+        self._load_shed = False
+        return True
 
     async def async_set_smart_eco_mode(
         self,
@@ -769,6 +835,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         )
 
         if new_switch_state == STATE_ON:
+            self._clear_load_shed("physical switch")
             if self._current_operation == STATE_OFF:
                 # Manual ON from OFF: use threshold-aware remap.
                 if self._electric_mode_wants_heating():
@@ -961,7 +1028,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     def _update_smart_eco_state(self) -> None:
         """Calculate and publish Smart Eco state label."""
-        if self._smart_eco_mode == SMART_ECO_MODE_OFF or self._eco_template is None:
+        if self._load_shed:
+            # Reported ahead of every policy state: while shed, nothing else is
+            # deciding whether this heater runs.
+            state = "Shed by load balancer"
+        elif self._smart_eco_mode == SMART_ECO_MODE_OFF or self._eco_template is None:
             state = "Off"
         elif self._smart_eco_pause_reason == "until_manual":
             state = "Stopped by manual control"
@@ -1114,6 +1185,23 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._smart_eco_pause_reason,
             self._eco_condition_met,
         )
+
+        # Load shedding outranks everything, including Smart Eco's Always ON
+        # policy: it protects the supply, it is not a user preference. It is
+        # checked before the Smart Eco block precisely so that the "eco allows
+        # heating -> restore heating mode" branch below cannot undo a shed.
+        # The operation mode is left untouched, so whatever the user asked for
+        # is still there when the shed is released.
+        if self._load_shed:
+            self._debug_log(
+                "decision: load shed active -> switch OFF (mode %s and eco policy preserved)",
+                self._current_operation,
+            )
+            await self._async_heater_turn_off(force=True)
+            self._debug_log_hvac_action("load shed")
+            self._update_smart_eco_state()
+            self.async_write_ha_state()
+            return
 
         smart_eco_active = self._is_smart_eco_enforcing()
         if smart_eco_active:
@@ -1323,10 +1411,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         )
         self._debug_log("service call completed: turn_on entity_id=%s", self.heater_entity_id)
 
-    async def _async_heater_turn_off(self):
-        """Turn heater toggleable device off."""
+    async def _async_heater_turn_off(self, force: bool = False):
+        """Turn heater toggleable device off.
+
+        ``force`` skips the min_on_duration hold. Load shedding uses it: that
+        minimum exists to stop thermostat noise short-cycling the relay, and
+        letting it delay a supply-protection action would hand the balancer a
+        shed that silently has not happened yet.
+        """
         now = dt_util.utcnow()
-        if self._last_switch_change_time:
+        if not force and self._last_switch_change_time:
             delta = now - self._last_switch_change_time
             if delta < self._min_on_duration:
                 _LOGGER.debug("Cooldown active (min_on_duration), delaying turn_off")

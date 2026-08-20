@@ -32,6 +32,9 @@ CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
 CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS = "smart_eco_manual_off_resume_hours"
 
+SERVICE_SHED = "shed"
+SERVICE_RELEASE = "release"
+
 SMART_ECO_MODE_OFF = "off"
 SMART_ECO_MODE_UNTIL_MANUAL = "until_manual"
 SMART_ECO_MODE_AUTO_RESUME = "auto_resume"

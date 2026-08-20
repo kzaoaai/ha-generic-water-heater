@@ -130,6 +130,36 @@ Current fleet state is exposed on each water heater entity as the `nominal_power
 `fleet_committed_power_w`, `fleet_power_budget_w`, `fleet_stagger_seconds` and `fleet_hold_reason`
 attributes. `fleet_hold_reason` names exactly why a heater is currently waiting.
 
+## Load shedding (external load balancer integration)
+
+An external load balancer that protects a shared supply needs to drop this heater without its
+request being mistaken for a person operating it. Calling `water_heater.set_operation_mode` for that
+is indistinguishable from someone using the UI, so it trips the manual-override handling and pauses
+Smart Eco for hours -- on the shed *and* again on the restore, leaving the tank heating outside its
+eco condition.
+
+Two entity services exist for that instead:
+
+| Service | Effect |
+| --- | --- |
+| `generic_water_heater.shed` | Forces the heater off for load shedding. The operation mode and Smart Eco policy are left exactly as they are -- no pause, no countdown, no notification. |
+| `generic_water_heater.release` | Releases the shed and resumes whatever was configured. No-op if not shed. |
+
+Behaviour while shed:
+
+- It outranks everything, including Smart Eco `Always ON`. Shedding protects the electrical supply;
+  it is not a user preference. Smart Eco's "eco allows heating, restore the heating mode" path
+  cannot undo a shed.
+- The `min_on_duration` hold is bypassed. That minimum exists to stop thermostat noise
+  short-cycling the relay, and letting it delay a supply-protection action would hand the balancer a
+  shed that has silently not happened yet. A **release** does still respect `min_off_duration`, so
+  the element may take up to that long to come back.
+- A person asking for heat wins -- `turn_on`, setting a heating operation mode, or flipping the
+  physical switch all clear the shed. A request to turn the heater *off* does not clear it; it has
+  nothing to win, and clearing on an ignored OFF could switch the element back on.
+- The heater reports `load_shed: true` and a Smart Eco state of `Shed by load balancer`.
+- The shed releases the heater's share of the fleet power budget, so a sibling can use the capacity.
+
 ## Smart Eco Mode
 
 Smart Eco Mode is a policy layer, not a water heater operation mode.
