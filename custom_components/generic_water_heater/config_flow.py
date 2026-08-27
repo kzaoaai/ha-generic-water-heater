@@ -10,10 +10,12 @@ from . import (
     CONF_COLD_TOLERANCE,
     CONF_DEBUG_LOGGING,
     CONF_ECO_TEMPLATE,
+    CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
     CONF_FLEET_POWER_BUDGET_W,
     CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
+    CONF_LEGIONELLA_INTERVAL_DAYS,
     CONF_NOMINAL_POWER_W,
         CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_HOT_TOLERANCE,
@@ -101,6 +103,16 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
                 default=current.get(CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR, False),
             ): selector({"boolean": {}}),
+            vol.Optional(
+                CONF_ENABLE_LEGIONELLA_SENSOR,
+                default=current.get(CONF_ENABLE_LEGIONELLA_SENSOR, False),
+            ): selector({"boolean": {}}),
+            vol.Optional(
+                CONF_LEGIONELLA_INTERVAL_DAYS,
+                default=current.get(CONF_LEGIONELLA_INTERVAL_DAYS, 7),
+            ): selector(
+                {"number": {"min": 1, "max": 90, "step": 1, "mode": "box", "unit_of_measurement": "days"}}
+            ),
         }
     )
 
@@ -126,6 +138,8 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
             user_input.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
             user_input.setdefault(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
+            user_input.setdefault(CONF_ENABLE_LEGIONELLA_SENSOR, False)
+            user_input.setdefault(CONF_LEGIONELLA_INTERVAL_DAYS, 7)
             return self.async_create_entry(title=user_input[CONF_NAME], data=user_input)
 
         return self.async_show_form(step_id="user", data_schema=_build_data_schema(), errors=errors)
@@ -145,6 +159,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             user_input.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
             user_input.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
             user_input.setdefault(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
+            user_input.setdefault(CONF_ENABLE_LEGIONELLA_SENSOR, False)
+            user_input.setdefault(CONF_LEGIONELLA_INTERVAL_DAYS, 7)
             return self.async_create_entry(title="", data=user_input)
 
         current = {**self.config_entry.data, **self.config_entry.options}

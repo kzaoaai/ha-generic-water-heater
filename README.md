@@ -209,6 +209,73 @@ Examples:
 
 If Smart Eco policy is active and the template evaluates to false, heating is blocked even if the target would otherwise request heat.
 
+## Legionella Risk Sensor
+
+An optional sensor reporting how favourable this tank's recent temperature history has been to
+Legionella growth, and how long since it last reached a disinfection temperature. Enable it with
+`enable_legionella_sensor`.
+
+**Read this before relying on it.** It is a *thermal-conditions index computed from one sensor at
+one height*. It is not a measurement of contamination, and only a laboratory culture or PCR test can
+tell you what is actually in your water. It is structurally blind to:
+
+- **The coldest water in the tank.** In a 151 L electric storage tank with the thermostat at 66 °C
+  the measured base was still 43.2 °C. Electric tanks are heated by side-wall immersion elements, so
+  water below the lowest element moves only by weak convection.
+- **Sediment**, where thermal disinfection fails worst — 50 °C for 4 hours produced no measurable
+  inactivation in water-heater deposits, and 55 °C left culturable cells after 24 hours.
+- **Biofilm and amoebae**, which shelter Legionella through sub-60 °C cycles.
+- **Every outlet downstream.** Distal pipework cools to room temperature within ~25 minutes of a
+  draw regardless of tank setpoint.
+
+### What it reports
+
+State is `Low`, `Elevated`, `High`, or `Unknown`, driven by how long it has been since a qualifying
+cycle relative to `legionella_interval_days` (`Elevated` past one interval, `High` past two). The
+numbers behind it are attributes: `days_since_disinfection`, `hold_progress_minutes`,
+`hours_in_growth_band_7d`, `equivalent_log10_reduction_7d` and `max_temperature_7d`.
+
+`hold_progress_minutes` is live, so a manual high-temperature session can be watched as it
+accumulates.
+
+### The model
+
+- A **qualifying cycle is 60 °C held for one continuous hour** at the sensor. Both figures are fixed,
+  not configurable. Guidance that prescribes a cycle at all (HSE HSG274 Part 2 cl. 2.25/2.28, ESGLI
+  cl. 3.154) asks for the whole vessel at ≥60 °C for an hour, and **below 60 °C a cycle is not a
+  gentler version of the same thing** — after a 4 h/55 °C shock with amoebae present, populations
+  rebounded 5 log₁₀ *higher* than controls within four days. A sub-60 °C option would be a footgun.
+- **The hold is hysteretic.** A mechanical tank thermostat cycles — slow decay, fast re-heat — so a
+  bare threshold is the wrong tool. A real 200 L tank rippled 59.6–64 °C with dips *below* 60 °C
+  lasting 19 and 28 minutes while sitting at pasteurisation temperature for five hours; a strict
+  "continuous hour ≥60 °C" would have reported it as never disinfected. So the window **opens** at
+  60 °C, stays open while the tank holds above 59 °C, and closes for good below that. Only time
+  genuinely at or above 60 °C counts toward the hour — ripple keeps the window open, it does not earn
+  credit. Sitting at 59.5 °C forever never opens a hold at all.
+- **An abandoned hold is discarded, never banked.** Partial treatment is the failure mode this is
+  meant to detect, not something to award partial credit for.
+- **Growth band is 20–50 °C**, deliberately wider than the 20–45 °C regulatory trigger: measured
+  multiplication does not stop until 48.4–50.0 °C, so a tank plateauing at 47 °C is still growing.
+- **Disinfection credit** uses the published inactivation kinetics (D₅₅ = 3.47 min, z = 5.54 °C),
+  accrued only within the model's validated 51–61 °C range and clamped at the top of it so nothing
+  above 61 °C is extrapolated.
+- **Every interval is credited at the lower of its two endpoint temperatures**, so a brief spike
+  between two widely spaced samples cannot claim the whole gap. Gaps longer than 30 minutes are
+  treated as unobserved rather than as held temperature.
+
+### Reaching a disinfection temperature
+
+`performance` mode heats continuously, ignoring the target, until the appliance's own mechanical
+thermostat opens — so it needs no change to `max_temp`. Two things to know:
+
+- **The mechanical thermostat is the real ceiling.** If it is set below 60 °C no cycle can ever
+  qualify, and the attempt would be exactly the sub-60 °C treatment described above.
+- **Smart Eco can cut a session short.** Switching from `electric` to `performance` is not a heating
+  boundary change, so it does not pause Smart Eco — and when the eco condition goes false the heater
+  is forced off mid-session. Switching from `off` to `performance` *does* pause Smart Eco, which
+  gives an uninterrupted session. Set the heater to `off` first, or set Smart Eco to Off for the
+  duration.
+
 ## Acknowledgments
 
 This project was originally inspired by the upstream work from [@dgomes](https://github.com/dgomes) on Generic Water Heater.

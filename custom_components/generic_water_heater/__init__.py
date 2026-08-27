@@ -30,6 +30,8 @@ CONF_FLEET_STAGGER_SECONDS = "fleet_stagger_seconds"
 CONF_FLEET_POWER_BUDGET_W = "fleet_power_budget_w"
 CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
+CONF_ENABLE_LEGIONELLA_SENSOR = "enable_legionella_sensor"
+CONF_LEGIONELLA_INTERVAL_DAYS = "legionella_interval_days"
 CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS = "smart_eco_manual_off_resume_hours"
 
 SERVICE_SHED = "shed"
