@@ -13,7 +13,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, EventStateChangedData, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -27,6 +26,7 @@ from . import (
     CONF_LEGIONELLA_INTERVAL_DAYS,
     CONF_SENSOR,
     DOMAIN,
+    async_resolve_heater_device,
     smart_eco_state_signal,
 )
 
@@ -159,15 +159,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
     source_sensor_entity_id = data.get(CONF_SENSOR)
     name = data.get(CONF_NAME)
 
-    registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
-    entity_entry = registry.async_get(heater_entity_id)
-    device_identifiers = None
-
-    if entity_entry and entity_entry.device_id:
-        device_entry = device_registry.async_get(entity_entry.device_id)
-        if device_entry:
-            device_identifiers = device_entry.identifiers
+    device_identifiers, device_has_name = async_resolve_heater_device(
+        hass, heater_entity_id
+    )
 
     if eco_template is not None:
         entities.append(
@@ -177,6 +171,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 name=name,
                 runtime=hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {}),
                 device_identifiers=device_identifiers,
+                device_has_name=device_has_name,
             )
         )
 
@@ -187,6 +182,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 source_sensor_entity_id=source_sensor_entity_id,
                 device_identifier=entry.entry_id,
                 device_identifiers=device_identifiers,
+                device_has_name=device_has_name,
             )
         )
 
@@ -197,6 +193,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 source_sensor_entity_id=source_sensor_entity_id,
                 device_identifier=entry.entry_id,
                 device_identifiers=device_identifiers,
+                device_has_name=device_has_name,
                 interval_days=data.get(CONF_LEGIONELLA_INTERVAL_DAYS, 7),
             )
         )
@@ -212,7 +209,15 @@ class SmartEcoStateSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "Smart Eco State"
 
-    def __init__(self, hass, entry_id: str, name: str | None, runtime: dict, device_identifiers):
+    def __init__(
+        self,
+        hass,
+        entry_id: str,
+        name: str | None,
+        runtime: dict,
+        device_identifiers,
+        device_has_name: bool = False,
+    ):
         """Initialize Smart Eco state sensor."""
         self.hass = hass
         self._entry_id = entry_id
@@ -220,7 +225,9 @@ class SmartEcoStateSensor(SensorEntity):
         self._device_identifiers = device_identifiers
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_smart_eco_state"
 
-        if not device_identifiers and name:
+        # Spell the name out unless the device can supply one. See
+        # async_resolve_heater_device.
+        if name and not device_has_name:
             self._attr_name = f"{name} Smart Eco State"
             self._attr_has_entity_name = False
 
@@ -267,6 +274,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         source_sensor_entity_id: str,
         device_identifier: str,
         device_identifiers,
+        device_has_name: bool = False,
     ) -> None:
         """Initialize the max temperature history sensor."""
         self._source_sensor_entity_id = source_sensor_entity_id
@@ -278,7 +286,9 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = None
 
-        if not device_identifiers and name:
+        # Spell the name out unless the device can supply one. See
+        # async_resolve_heater_device.
+        if name and not device_has_name:
             self._attr_name = f"{name} Highest Temperature (7 days)"
             self._attr_has_entity_name = False
 
@@ -460,6 +470,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [STATE_UNKNOWN_RISK, STATE_LOW, STATE_ELEVATED, STATE_HIGH]
     _attr_has_entity_name = True
+    _attr_icon = "mdi:virus"
     _attr_name = "Legionella Risk"
     _attr_should_poll = False
 
@@ -470,6 +481,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         device_identifier: str,
         device_identifiers,
         interval_days: int,
+        device_has_name: bool = False,
     ) -> None:
         """Initialize the Legionella thermal-conditions sensor."""
         self._source_sensor_entity_id = source_sensor_entity_id
@@ -486,7 +498,10 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         self._hold_open = False
         self._attr_native_value = STATE_UNKNOWN_RISK
 
-        if not device_identifiers and name:
+        # Spell the name out unless the device can supply one. Without this a
+        # heater on an unnamed device produced a bare "Legionella Risk", which
+        # is ambiguous the moment there is more than one tank.
+        if name and not device_has_name:
             self._attr_name = f"{name} Legionella Risk"
             self._attr_has_entity_name = False
 

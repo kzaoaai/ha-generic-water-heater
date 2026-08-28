@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import CONF_NAME
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -15,6 +14,7 @@ from . import (
     SMART_ECO_MODE_AUTO_RESUME,
     SMART_ECO_MODE_OFF,
     SMART_ECO_MODE_UNTIL_MANUAL,
+    async_resolve_heater_device,
     smart_eco_signal,
 )
 
@@ -41,15 +41,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
     if runtime.get("smart_eco_mode") is None:
         runtime["smart_eco_mode"] = SMART_ECO_MODE_AUTO_RESUME
 
-    registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
-    entity_entry = registry.async_get(heater_entity_id)
-    device_identifiers = None
-
-    if entity_entry and entity_entry.device_id:
-        device_entry = device_registry.async_get(entity_entry.device_id)
-        if device_entry:
-            device_identifiers = device_entry.identifiers
+    device_identifiers, device_has_name = async_resolve_heater_device(
+        hass, heater_entity_id
+    )
 
     async_add_entities(
         [
@@ -59,6 +53,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 name=name,
                 runtime=runtime,
                 device_identifiers=device_identifiers,
+                device_has_name=device_has_name,
             )
         ]
     )
@@ -72,7 +67,15 @@ class GenericWaterHeaterSmartEcoSelect(SelectEntity, RestoreEntity):
     _attr_name = "Smart Eco Mode"
     _attr_options = list(_OPTION_TO_MODE.keys())
 
-    def __init__(self, hass, entry_id: str, name: str | None, runtime: dict, device_identifiers):
+    def __init__(
+        self,
+        hass,
+        entry_id: str,
+        name: str | None,
+        runtime: dict,
+        device_identifiers,
+        device_has_name: bool = False,
+    ):
         """Initialize Smart Eco select."""
         self.hass = hass
         self._entry_id = entry_id
@@ -80,7 +83,9 @@ class GenericWaterHeaterSmartEcoSelect(SelectEntity, RestoreEntity):
         self._device_identifiers = device_identifiers
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_smart_eco_select"
 
-        if not device_identifiers and name:
+        # Spell the name out unless the device can supply one. See
+        # async_resolve_heater_device.
+        if name and not device_has_name:
             self._attr_name = f"{name} Smart Eco Mode"
             self._attr_has_entity_name = False
 

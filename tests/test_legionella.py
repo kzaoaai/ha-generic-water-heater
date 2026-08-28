@@ -342,3 +342,48 @@ def test_a_deep_drop_still_abandons_the_hold():
 
     assert not sensor._hold_open
     assert sensor._hold_seconds == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Naming and presentation
+# ---------------------------------------------------------------------------
+
+
+def test_the_sensor_carries_the_virus_icon():
+    """Requested by design."""
+    assert build()._attr_icon == "mdi:virus"
+
+
+def test_an_unnamed_device_does_not_produce_a_bare_name():
+    """Regression: a heater on an unnamed device became "Legionella Risk".
+
+    Some integrations register devices with name=None (localtuya does). Leaving
+    Home Assistant to compose "<device> <entity>" then yields a bare, ambiguous
+    name -- and with two tanks, two entities claiming to be "Legionella Risk".
+    """
+    sensor = LegionellaRiskSensor(
+        name="Downstairs Water Heater",
+        source_sensor_entity_id="sensor.downstairs_temperature",
+        device_identifier="01JQ0000000000000000DWNSTR",
+        device_identifiers={("some_integration", "device-1")},
+        interval_days=7,
+        device_has_name=False,
+    )
+
+    assert sensor._attr_name == "Downstairs Water Heater Legionella Risk"
+    assert sensor._attr_has_entity_name is False
+
+
+def test_a_named_device_still_supplies_the_prefix():
+    """Where the device has a name, let Home Assistant compose as before."""
+    sensor = LegionellaRiskSensor(
+        name="Upstairs Water Heater",
+        source_sensor_entity_id="sensor.upstairs_temperature",
+        device_identifier="01JQ0000000000000000UPSTRS",
+        device_identifiers={("some_integration", "device-2")},
+        interval_days=7,
+        device_has_name=True,
+    )
+
+    assert sensor._attr_name == "Legionella Risk"
+    assert sensor._attr_has_entity_name is True

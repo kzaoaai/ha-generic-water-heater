@@ -51,10 +51,9 @@ async def release(hass, entity_id):
     await hass.async_block_till_done()
 
 
-# The test entries configure min_off_duration as 0, which the integration reads
-# as falsy and replaces with its 120 s default, so a heater that has just been
-# switched off cannot come back for that long. Ticking past it keeps these tests
-# about shedding rather than about the anti-short-cycle hold.
+# Kept as a comfortable margin so these tests are about shedding rather than
+# about any anti-short-cycle hold. (Until the timedelta(0) fix, the entries'
+# configured 0 was silently read as the 120 s default, and this had to clear it.)
 MIN_OFF_HOLD = timedelta(seconds=130)
 
 

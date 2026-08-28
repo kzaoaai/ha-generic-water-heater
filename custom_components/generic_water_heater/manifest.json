@@ -6,7 +6,7 @@
     "@kzaoaai"
   ],
   "name": "Generic Water Heater",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "dependencies": [
     "sensor",
     "select"

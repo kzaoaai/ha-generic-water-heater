@@ -370,3 +370,36 @@ async def test_a_switch_already_on_is_booked_before_a_sibling_is_admitted(
 
     assert commanded(switches["turn_on"]) == []
     assert "budget" in downstairs._fleet_hold_reason
+
+
+# ---------------------------------------------------------------------------
+# Configured minimum durations
+# ---------------------------------------------------------------------------
+
+
+async def test_a_configured_zero_minimum_is_honoured(hass, switches, make_heater):
+    """timedelta(0) is falsy, and was being mistaken for "not configured".
+
+    The config said 0 and the code used 120 s, which is the worst kind of
+    disagreement: silent, and only visible as a command that mysteriously
+    does not land for two minutes.
+    """
+    heater = make_heater(UPSTAIRS_ENTRY, "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR)
+
+    assert heater._min_off_duration == timedelta(0)
+    assert heater._min_on_duration == timedelta(0)
+
+
+async def test_an_omitted_minimum_still_gets_its_default(hass, switches):
+    """Absent means "use the default" -- only absent."""
+    heater = GenericWaterHeater(
+        hass, "Defaults", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 60.0, 1.0, 0.0, 0.0,
+        15.0, 80.0,
+        None,  # min_on_duration omitted
+        None,  # min_off_duration omitted
+        None, False, "°C", {}, 6,
+        config_entry_id="01JQ000000000000000DEFLT",
+    )
+
+    assert heater._min_on_duration == timedelta(seconds=0)
+    assert heater._min_off_duration == timedelta(seconds=120)

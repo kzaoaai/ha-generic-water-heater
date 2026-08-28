@@ -62,8 +62,10 @@ This integration is configured from the Home Assistant UI.
 | `min_temp` | float | `15.0` | Minimum selectable target temperature. |
 | `max_temp` | float | `80.0` | Maximum selectable target temperature. |
 | `min_on_duration` | duration | `0 seconds` | Minimum time the heater must stay on before it can be turned off. |
-| `min_off_duration` | duration | `120 seconds` | Minimum time the heater must stay off before it can be turned on. |
+| `min_off_duration` | duration | `120 seconds` | Minimum time the heater must stay off before it can be turned on. A configured `0` means zero; the default applies only when the option is absent. |
 | `eco_mode_template_condition` | template | empty | Boolean template used by Smart Eco policy. If empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
+| `enable_legionella_sensor` | boolean | `false` | Adds the Legionella thermal-conditions sensor described below. |
+| `legionella_interval_days` | number | `7` | How long a completed disinfection cycle counts for before the sensor reports Elevated (and twice that before High). |
 | `nominal_power_w` | number | `0` | Nameplate power of this heating element, in watts. Used for fleet load admission. `0` means unknown, which makes this heater invisible to the fleet power budget. |
 | `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
 | `fleet_power_budget_w` | number | `0` | Maximum combined nominal power all instances may have switched on at once. `0` disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. |

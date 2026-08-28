@@ -6,6 +6,7 @@ from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .fleet import FLEET_KEY, HeaterFleet
 
@@ -44,6 +45,28 @@ SMART_ECO_MODE_ALWAYS_ON = "always_on"
 
 LEGACY_CONF_ECO_ENTITY = "eco_entity"
 LEGACY_CONF_ECO_VALUE = "eco_value"
+
+
+def async_resolve_heater_device(hass: HomeAssistant, heater_entity_id: str):
+    """Return (device identifiers, whether that device has a usable name).
+
+    ``has_name`` is False when no device is linked to the heater switch, and
+    also when a device IS linked but carries no name of its own. Some
+    integrations register devices with ``name=None`` -- localtuya does -- and an
+    entity that leaves Home Assistant to compose "<device name> <entity name>"
+    then ends up with a bare, ambiguous one: two water heaters both reporting
+    "Legionella Risk". Callers use this to decide whether to spell the full name
+    out themselves instead of relying on the device for it.
+    """
+    entity_entry = er.async_get(hass).async_get(heater_entity_id)
+    if entity_entry is None or not entity_entry.device_id:
+        return None, False
+
+    device_entry = dr.async_get(hass).async_get(entity_entry.device_id)
+    if device_entry is None:
+        return None, False
+
+    return device_entry.identifiers, bool(device_entry.name_by_user or device_entry.name)
 
 
 def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:

@@ -219,8 +219,15 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._hot_tolerance = hot_tolerance
         self._min_temp = min_temp
         self._max_temp = max_temp
-        self._min_on_duration = min_on_duration if min_on_duration else timedelta(seconds=0)
-        self._min_off_duration = min_off_duration if min_off_duration else timedelta(seconds=120)
+        # `is not None`, not truthiness: timedelta(0) is falsy, so a configured
+        # 0 was silently replaced by the 120 s default -- the config said one
+        # thing and the code did another.
+        self._min_on_duration = (
+            min_on_duration if min_on_duration is not None else timedelta(seconds=0)
+        )
+        self._min_off_duration = (
+            min_off_duration if min_off_duration is not None else timedelta(seconds=120)
+        )
         self._eco_template = Template(eco_template, hass) if eco_template else None
         self._runtime = runtime
         self._smart_eco_mode = runtime.get("smart_eco_mode", SMART_ECO_MODE_OFF)
