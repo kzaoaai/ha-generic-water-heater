@@ -9,6 +9,11 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states).
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
+  A switch returning from `unavailable` is **not** treated as a manual action: it is a device
+  reconnecting and reporting the state it already had. Without that distinction a brief network
+  dropout could be read as "someone flipped it on", promoting `electric` to `performance` and
+  running the element to the tank's own mechanical cutout. A genuine flip still arrives as a real
+  `off` -> `on` transition and behaves exactly as before.
 - Always ON temporary override behavior for manual underlying switch changes, with countdown state and persistent notifications.
 - Minimum on and off durations to avoid rapid switching.
 - Fleet load coordination across every instance, so several heaters cannot step onto a shared inverter or generator at the same moment.

@@ -789,7 +789,29 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     new_state.state,
                 )
 
-            if (
+            # A device coming back from unavailable is reporting the state it
+            # already had -- it is not a person acting on the switch. Treating
+            # it as one let a Wi-Fi blip promote ELECTRIC to PERFORMANCE (the
+            # "they flipped it on even though electric would idle, so they want
+            # heat now" rule) and run a multi-kW element to the tank's
+            # mechanical cutout. Observed 2026-09-06 and 2026-09-08: eleven
+            # dropouts, two runaways to 63.7 C and 64.4 C against a 45 C target.
+            #
+            # This is the same exclusion the baseline-seeding line above already
+            # applies; it simply was never applied to the override branches.
+            # A genuine flip still arrives as a real off -> on transition.
+            returned_from_unavailable = old_state is None or old_state.state in (
+                STATE_UNAVAILABLE,
+                STATE_UNKNOWN,
+            )
+
+            if returned_from_unavailable:
+                self._debug_log(
+                    "switch reappeared as %s after %s; not treating as manual intent",
+                    new_state.state,
+                    "no previous state" if old_state is None else old_state.state,
+                )
+            elif (
                 self._last_commanded_switch_state is not None
                 and new_state.state != self._last_commanded_switch_state
             ):

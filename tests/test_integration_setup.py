@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from freezegun import freeze_time
 import pytest
+from homeassistant.components.water_heater import STATE_ELECTRIC, STATE_PERFORMANCE
 from homeassistant.const import CONF_NAME, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -51,7 +52,17 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
-def build_entry(name, switch, sensor, nominal_power_w, budget_w=0.0, stagger_seconds=60.0):
+def build_entry(
+    name,
+    switch,
+    sensor,
+    nominal_power_w,
+    budget_w=0.0,
+    stagger_seconds=60.0,
+    target_temp=60.0,
+    cold_tolerance=0.0,
+    hot_tolerance=0.0,
+):
     """Return a config entry shaped like the two real ones."""
     return MockConfigEntry(
         domain=DOMAIN,
@@ -61,10 +72,10 @@ def build_entry(name, switch, sensor, nominal_power_w, budget_w=0.0, stagger_sec
             CONF_NAME: name,
             CONF_HEATER: switch,
             CONF_SENSOR: sensor,
-            CONF_TARGET_TEMP: 60.0,
+            CONF_TARGET_TEMP: target_temp,
             CONF_TEMP_STEP: 1.0,
-            CONF_COLD_TOLERANCE: 0.0,
-            CONF_HOT_TOLERANCE: 0.0,
+            CONF_COLD_TOLERANCE: cold_tolerance,
+            CONF_HOT_TOLERANCE: hot_tolerance,
             CONF_TEMP_MIN: 15.0,
             CONF_TEMP_MAX: 80.0,
             "min_on_duration": {"seconds": 0},
@@ -115,13 +126,15 @@ def world(hass):
     return calls
 
 
-async def setup_both(hass, *, budget_w=0.0, stagger_seconds=60.0):
+async def setup_both(hass, *, budget_w=0.0, stagger_seconds=60.0, **entry_kwargs):
     """Load both config entries and return them."""
     upstairs = build_entry(
-        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 2000.0, budget_w, stagger_seconds
+        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 2000.0, budget_w, stagger_seconds,
+        **entry_kwargs,
     )
     downstairs = build_entry(
-        "Downstairs", DOWNSTAIRS_SWITCH, DOWNSTAIRS_SENSOR, 1300.0, budget_w, stagger_seconds
+        "Downstairs", DOWNSTAIRS_SWITCH, DOWNSTAIRS_SENSOR, 1300.0, budget_w, stagger_seconds,
+        **entry_kwargs,
     )
     for entry in (upstairs, downstairs):
         entry.add_to_hass(hass)
@@ -360,3 +373,105 @@ async def test_killing_a_heater_at_the_breaker_eventually_frees_its_sibling(hass
 
     assert commanded(world["turn_on"]) == [deferred.heater_entity_id]
     assert fleet.committed_power_w == deferred._nominal_power_w
+
+
+# ---------------------------------------------------------------------------
+# Regression: the 2026-09-08 runaway
+#
+# A Wi-Fi dropout on the switch returned as unavailable -> on, which the manual
+# override handling read as a person flipping it. Because the tank was already
+# above target - cold_tolerance, the "they want heat now" rule promoted ELECTRIC
+# to PERFORMANCE -- which ignores the target and runs the element to the tank's
+# own mechanical cutout. Two evenings, 63.7 C and 64.4 C against a 45 C target,
+# roughly 5 kWh off the house battery each time.
+#
+# The real trace contains BOTH outcomes 21 minutes apart, which is what makes it
+# such a good test case: the flap below the threshold was harmless, the one
+# above it was not.
+# ---------------------------------------------------------------------------
+
+REAL_TARGET = 45.0
+REAL_COLD_TOLERANCE = 2.0   # electric wants heat at or below 43 C
+REAL_HOT_TOLERANCE = 3.0    # and gives up at or above 48 C
+
+
+async def heating_upstairs(hass, world, temperature):  # noqa: F811
+    """Get the upstairs tank heating under eco at a chosen temperature."""
+    hass.states.async_set(UPSTAIRS_SENSOR, str(temperature), {"device_class": "temperature"})
+    await setup_both(
+        hass,
+        target_temp=REAL_TARGET,
+        cold_tolerance=REAL_COLD_TOLERANCE,
+        hot_tolerance=REAL_HOT_TOLERANCE,
+    )
+    hass.states.async_set(PV_EXCESS, STATE_ON)
+    await hass.async_block_till_done()
+    return entities(hass)["Upstairs"]
+
+
+async def flap(hass, entity_id):
+    """Drop the switch off the network and let it come back on, as observed."""
+    hass.states.async_set(entity_id, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    hass.states.async_set(entity_id, STATE_ON)
+    await hass.async_block_till_done()
+
+
+async def test_dropout_above_the_threshold_must_not_promote_via_pending(hass, world):
+    """The 16:31 flap, through the branch that actually fired.
+
+    The promotion needs an outstanding deferred command -- in production the
+    fleet stagger or a min_off/min_on cooldown arms it, and the real incident
+    had one outstanding. Without that precondition neither override branch fires
+    and the bug does not reproduce at all, so it is set explicitly here.
+    """
+    upstairs = await heating_upstairs(hass, world, 41.0)
+    hass.states.async_set(UPSTAIRS_SENSOR, "47", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not upstairs._electric_mode_wants_heating(), "test premise: electric would idle"
+    assert upstairs.state == STATE_ELECTRIC
+
+    upstairs._pending_switch_state = STATE_ON
+    await flap(hass, UPSTAIRS_SWITCH)
+
+    assert upstairs.state != STATE_PERFORMANCE, (
+        "a network dropout promoted the tank to performance and would run the "
+        "element to its mechanical cutout"
+    )
+
+
+async def test_dropout_must_not_promote_via_stale_command_baseline(hass, world):
+    """The other override branch: the switch reappears disagreeing with us.
+
+    If the integration last commanded OFF and the device comes back reporting
+    ON, that mismatch is a reconnect reporting its own state -- not a person.
+    """
+    upstairs = await heating_upstairs(hass, world, 41.0)
+    hass.states.async_set(UPSTAIRS_SENSOR, "47", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not upstairs._electric_mode_wants_heating()
+
+    upstairs._last_commanded_switch_state = STATE_OFF
+    await flap(hass, UPSTAIRS_SWITCH)
+
+    assert upstairs.state != STATE_PERFORMANCE, (
+        "a reconnect disagreeing with the last command was read as a human"
+    )
+
+
+async def test_a_real_flip_above_the_threshold_still_promotes(hass, world):
+    """The feature itself is preserved: a genuine off -> on still means heat now."""
+    upstairs = await heating_upstairs(hass, world, 41.0)
+    hass.states.async_set(UPSTAIRS_SENSOR, "47", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+
+    # A person at the switch device's own button: it stays powered, so this is
+    # a real off -> on, not a reappearance.
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
+    await hass.async_block_till_done()
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+    await hass.async_block_till_done()
+
+    assert upstairs.state == STATE_PERFORMANCE, (
+        "a genuine physical flip should still force heat"
+    )
