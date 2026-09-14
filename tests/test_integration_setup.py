@@ -62,6 +62,7 @@ def build_entry(
     target_temp=60.0,
     cold_tolerance=0.0,
     hot_tolerance=0.0,
+    **extra,
 ):
     """Return a config entry shaped like the two real ones."""
     return MockConfigEntry(
@@ -84,6 +85,7 @@ def build_entry(
             CONF_NOMINAL_POWER_W: nominal_power_w,
             CONF_FLEET_STAGGER_SECONDS: stagger_seconds,
             CONF_FLEET_POWER_BUDGET_W: budget_w,
+            **extra,
         },
     )
 

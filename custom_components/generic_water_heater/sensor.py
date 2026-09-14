@@ -14,7 +14,10 @@ from homeassistant.components.sensor import (
 from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, EventStateChangedData, callback
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
@@ -27,6 +30,7 @@ from . import (
     CONF_SENSOR,
     DOMAIN,
     async_resolve_heater_device,
+    legionella_risk_signal,
     smart_eco_state_signal,
 )
 
@@ -213,6 +217,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 device_identifiers=device_identifiers,
                 device_has_name=device_has_name,
                 interval_days=data.get(CONF_LEGIONELLA_INTERVAL_DAYS, 7),
+                runtime=hass.data.setdefault(DOMAIN, {}).setdefault(
+                    entry.entry_id, {}
+                ),
             )
         )
 
@@ -515,8 +522,10 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         device_identifiers,
         interval_days: int,
         device_has_name: bool = False,
+        runtime: dict | None = None,
     ) -> None:
         """Initialize the Legionella thermal-conditions sensor."""
+        self._runtime = runtime
         self._source_sensor_entity_id = source_sensor_entity_id
         self._device_identifier = device_identifier
         self._device_identifiers = device_identifiers
@@ -623,7 +632,31 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._async_add_sample(source_state.state)
 
         self._recalculate()
+        self._publish_risk()
         self.async_write_ha_state()
+
+    @callback
+    def _publish_risk(self) -> None:
+        """Share the verdict with the water heater on the same config entry.
+
+        The two are separate platforms with no reference to each other, so the
+        disinfection policy reads the risk through the entry's runtime dict and
+        is woken by a dispatcher signal -- the same wiring the Smart Eco select
+        already uses in the other direction.
+        """
+        if self._runtime is not None:
+            self._runtime["legionella_risk"] = self._attr_native_value
+            self._runtime["legionella_hold_progress_minutes"] = round(
+                self._hold_seconds / 60, 1
+            )
+
+        if getattr(self, "hass", None) is None:
+            return
+        async_dispatcher_send(
+            self.hass,
+            legionella_risk_signal(self._device_identifier),
+            self._attr_native_value,
+        )
 
     @callback
     def _restore_hold(self, stored: LegionellaStoredData, now: datetime) -> None:
@@ -693,6 +726,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             return
         self._async_add_sample(new_state.state, event.time_fired)
         self._recalculate()
+        self._publish_risk()
         self.async_write_ha_state()
 
     @callback

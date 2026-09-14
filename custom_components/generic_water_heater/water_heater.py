@@ -32,7 +32,10 @@ from homeassistant.helpers.event import (
     async_track_template_result,
 )
 from homeassistant.helpers import entity_platform
-from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import homeassistant.helpers.config_validation as cv
@@ -69,6 +72,13 @@ from . import (
     async_get_fleet,
     smart_eco_signal,
     smart_eco_state_signal,
+    legionella_signal,
+    legionella_risk_signal,
+    DISINFECTION_GIVE_UP_DAYS,
+    LEGIONELLA_MODE_OFF,
+    LEGIONELLA_MODE_ON,
+    LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    LEGIONELLA_MODES,
 )
 from .fleet import DEFAULT_BUDGET_W, DEFAULT_NOMINAL_POWER_W, DEFAULT_STAGGER_SECONDS
 
@@ -272,6 +282,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # device/unique id
         # prefer config_entry_id (when created via UI) otherwise fall back to heater entity id
         self._device_identifier = config_entry_id or heater_entity_id
+        # Disinfection policy. The cycle is goal-seeking: it asks for
+        # PERFORMANCE and waits for the risk sensor to report Low. It does not
+        # outrank Smart Eco or a load shed -- both are checked ahead of the
+        # operation mode, so respecting them needs no code here at all.
+        self._legionella_mode = LEGIONELLA_MODE_OFF
+        self._disinfecting = False
+        self._disinfection_prior_mode: str | None = None
+        self._disinfection_started_at: str | None = None
         # expose unique_id for the entity
         try:
             self._attr_unique_id = f"{DOMAIN}_{self._device_identifier}"
@@ -307,6 +325,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "fleet_stagger_seconds": self._fleet.stagger_seconds,
             "fleet_hold_reason": self._fleet_hold_reason,
             "load_shed": self._load_shed,
+            "legionella_mode": self._legionella_mode,
+            "disinfection_active": self._disinfecting,
+            "disinfection_started_at": self._disinfection_started_at,
+            "disinfection_return_mode": self._disinfection_prior_mode,
         }
 
     @property
@@ -378,6 +400,15 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         call landing here is unambiguously a person, so it is safe to treat as
         manual intent.
         """
+        # A person changing the mode mid-cycle takes the tank back. Ending the
+        # cycle here rather than only in the select is what stops two things:
+        # an orphaned _disinfecting flag that never clears, and -- far worse --
+        # _smart_eco_last_heating_mode left at PERFORMANCE, which the eco gate
+        # would faithfully restore later as an unbounded performance run. That
+        # is the exact failure this feature exists to prevent.
+        if self._disinfecting and operation_mode != STATE_PERFORMANCE:
+            self._end_disinfection("manual mode change", stand_down=True)
+
         old_mode = self._current_operation
 
         if operation_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
@@ -471,6 +502,179 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._load_shed = False
         await self._async_control_heating()
         self.async_write_ha_state()
+
+    async def async_set_legionella_mode(self, mode: str, source: str) -> None:
+        """Set the disinfection policy for this tank."""
+        if mode not in LEGIONELLA_MODES or self._legionella_mode == mode:
+            return
+
+        self._legionella_mode = mode
+        self._runtime["legionella_mode"] = mode
+        self._debug_log("disinfection policy: %s (source=%s)", mode, source)
+
+        if mode == LEGIONELLA_MODE_OFF and self._disinfecting:
+            self._end_disinfection("policy turned off")
+            await self._async_control_heating()
+        else:
+            await self._async_evaluate_disinfection()
+
+        self._notify_legionella_select()
+        self.async_write_ha_state()
+
+    async def _async_evaluate_disinfection(self) -> None:
+        """Start or finish a cycle from the risk sensor's own verdict."""
+        risk = self._runtime.get("legionella_risk")
+
+        if self._disinfecting:
+            if risk == "Low":
+                self._end_disinfection("risk cleared", completed=True)
+                await self._async_control_heating()
+            return
+
+        if self._legionella_mode == LEGIONELLA_MODE_OFF:
+            return
+        if risk not in ("Elevated", "High"):
+            return
+
+        # A tank a person has switched off stays off. Smart Eco parking the
+        # mode at OFF looks identical in current_operation, so separate the two
+        # rather than reading intent into a value the eco gate wrote itself.
+        eco_parked = self._is_smart_eco_enforcing() and not self._eco_condition_met
+        if self._current_operation == STATE_OFF and not eco_parked:
+            self._debug_log("disinfection: tank is off by request, not starting")
+            return
+
+        prior = (
+            self._current_operation
+            if self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE)
+            else self._smart_eco_last_heating_mode
+        )
+        # Never stash PERFORMANCE as the mode to come back to. Reverting a
+        # disinfection cycle into an unbounded performance run is the failure
+        # this whole feature exists to avoid.
+        if prior != STATE_ELECTRIC:
+            prior = STATE_ELECTRIC
+
+        self._disinfecting = True
+        self._disinfection_prior_mode = prior
+        self._disinfection_started_at = dt_util.utcnow().isoformat()
+        self._current_operation = STATE_PERFORMANCE
+        # Carry the request across the nightly eco gap: the eco gate parks the
+        # mode at OFF and restores this value when the condition returns.
+        self._smart_eco_last_heating_mode = STATE_PERFORMANCE
+        self._runtime["smart_eco_last_heating_mode"] = STATE_PERFORMANCE
+        _LOGGER.info("%s: disinfection cycle started (risk=%s)", self.name, risk)
+        self._debug_log("disinfection: started, will return to %s", prior)
+        await self._async_control_heating()
+        self.async_write_ha_state()
+
+    @callback
+    def _end_disinfection(
+        self, reason: str, completed: bool = False, stand_down: bool = False
+    ) -> None:
+        """Finish a cycle and hand the tank back. Caller re-runs control.
+
+        ``stand_down`` also sets the policy to Off. A person who takes the tank
+        back mid-cycle should not have it pulled into PERFORMANCE again by a
+        standing policy the moment the risk sensor next reports; re-arming is
+        one tap, and the select shows plainly that it is no longer armed.
+        """
+        if not self._disinfecting:
+            return
+
+        prior = self._disinfection_prior_mode or STATE_ELECTRIC
+        self._disinfecting = False
+        self._disinfection_prior_mode = None
+        self._disinfection_started_at = None
+
+        if self._current_operation == STATE_PERFORMANCE:
+            self._current_operation = prior
+        # Also correct what the eco gate would restore, whether or not the mode
+        # is parked at OFF right now.
+        self._smart_eco_last_heating_mode = prior
+        self._runtime["smart_eco_last_heating_mode"] = prior
+
+        one_shot_done = (
+            completed and self._legionella_mode == LEGIONELLA_MODE_UNTIL_DISINFECTED
+        )
+        if one_shot_done or stand_down:
+            self._legionella_mode = LEGIONELLA_MODE_OFF
+            self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
+            self._notify_legionella_select()
+
+        _LOGGER.info("%s: disinfection cycle ended (%s)", self.name, reason)
+        self._debug_log("disinfection: ended (%s), back to %s", reason, prior)
+
+    @callback
+    def _notify_legionella_select(self) -> None:
+        """Refresh the policy select after the integration changes it."""
+        async_dispatcher_send(
+            self.hass, legionella_signal(self._device_identifier), self._legionella_mode
+        )
+        select_entity = self._runtime.get("legionella_select_entity")
+        if select_entity is not None:
+            select_entity.async_write_ha_state()
+
+    @callback
+    def _check_disinfection_give_up(self) -> bool:
+        """Abandon a cycle that is getting nowhere. Returns True if abandoned.
+
+        Deliberately a calendar bound on the whole request, not a cap on run
+        length: most of a hold is banked unpowered while the tank coasts down
+        over an evening, so a run-length cap would abort the part that earns the
+        credit. A tank that cannot get there in three days is not going to --
+        one of the two here provably cannot reach 60 C inside a PV window at
+        all -- and the owner should hear about it rather than keep paying for it.
+        """
+        if not self._disinfecting or self._disinfection_started_at is None:
+            return False
+
+        started = dt_util.parse_datetime(self._disinfection_started_at)
+        if started is None:
+            # Unreadable stamp: re-stamp rather than leave the cycle unbounded
+            # forever. Costs at most one extra interval, never an escape.
+            _LOGGER.warning(
+                "%s: unreadable disinfection start time %r, restarting the bound",
+                self.name,
+                self._disinfection_started_at,
+            )
+            self._disinfection_started_at = dt_util.utcnow().isoformat()
+            return False
+        if dt_util.utcnow() - started < timedelta(days=DISINFECTION_GIVE_UP_DAYS):
+            return False
+
+        progress = self._runtime.get("legionella_hold_progress_minutes")
+        if self._load_shed:
+            blocked_by = (
+                "The load balancer is currently shedding this tank, which may be "
+                "what stopped it getting there."
+            )
+        elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
+            blocked_by = (
+                "Smart Eco is gating it -- pause Smart Eco and run it again if "
+                "you want to push it through."
+            )
+        else:
+            blocked_by = (
+                "Nothing is blocking it right now, so the element most likely "
+                "cannot reach 60 °C at this tank's sensor."
+            )
+        self._end_disinfection("no disinfection reached in time")
+        self._legionella_mode = LEGIONELLA_MODE_OFF
+        self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
+        self._notify_legionella_select()
+        persistent_notification.async_create(
+            self.hass,
+            (
+                f"{self.name} ran a disinfection cycle for "
+                f"{DISINFECTION_GIVE_UP_DAYS} days without reaching 60 °C for a "
+                "full hour, so it has been stopped and the policy set to Off. "
+                f"Hold progress reached {progress} minutes. {blocked_by}"
+            ),
+            title="Water heater disinfection gave up",
+            notification_id=f"{DOMAIN}_{self._device_identifier}_disinfection",
+        )
+        return True
 
     @callback
     def _clear_load_shed(self, source: str) -> bool:
@@ -595,6 +799,28 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if restored_last_heating_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
                 self._smart_eco_last_heating_mode = restored_last_heating_mode
                 self._runtime["smart_eco_last_heating_mode"] = restored_last_heating_mode
+
+            restored_legionella_mode = old_state.attributes.get("legionella_mode")
+            if restored_legionella_mode in LEGIONELLA_MODES:
+                self._legionella_mode = restored_legionella_mode
+                self._runtime["legionella_mode"] = restored_legionella_mode
+                # The select restores the same value from its own history. Push
+                # this one at it so the two cannot disagree whichever platform
+                # finishes setting up first.
+                self._notify_legionella_select()
+
+            if old_state.attributes.get("disinfection_active") is True:
+                self._disinfecting = True
+                # Only ELECTRIC is ever stashed (see _async_evaluate_disinfection),
+                # so there is nothing to read back -- reading the attribute and
+                # then collapsing every value to ELECTRIC only looked like a check.
+                self._disinfection_prior_mode = STATE_ELECTRIC
+                restored_started = old_state.attributes.get("disinfection_started_at")
+                self._disinfection_started_at = (
+                    restored_started
+                    if isinstance(restored_started, str)
+                    else dt_util.utcnow().isoformat()
+                )
         
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
@@ -635,10 +861,38 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 else:
                     self._clear_smart_eco_pause_state()
 
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                legionella_risk_signal(self._device_identifier),
+                self._async_handle_legionella_risk,
+            )
+        )
+
+        # A restart restores current_operation and re-runs control at the end of
+        # this method, so a stale PERFORMANCE would re-arm before anything could
+        # stop it. Reconcile the two restored facts against each other first.
+        if self._disinfecting and self._legionella_mode == LEGIONELLA_MODE_OFF:
+            self._end_disinfection("policy was off at restart")
+        elif not self._disinfecting and self._current_operation == STATE_PERFORMANCE:
+            self._debug_log(
+                "restored performance without an active cycle; leaving it alone"
+            )
+
         self._async_refresh_eco_condition()
         self._update_smart_eco_state()
+        # Evaluate first: a cycle that should be running must own the mode
+        # before the control pass acts on it, or the pass commands the tank on
+        # the pre-cycle mode and the switch change that follows is read against
+        # a command the entity never meant to issue.
+        await self._async_evaluate_disinfection()
         await self._async_control_heating()
         self.async_write_ha_state()
+
+    @callback
+    def _async_handle_legionella_risk(self, _risk) -> None:
+        """Re-evaluate the policy when the risk sensor reports a new verdict."""
+        self.hass.async_create_task(self._async_evaluate_disinfection())
 
     async def async_will_remove_from_hass(self) -> None:
         """Cancel pending timers so nothing fires after the entity is gone.
@@ -1215,6 +1469,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._eco_condition_met,
         )
 
+        # Checked before the load-shed return below, so a tank held down by the
+        # balancer for days still abandons a hopeless cycle rather than keeping
+        # the request standing forever with nobody told.
+        self._check_disinfection_give_up()
+
         # Load shedding outranks everything, including Smart Eco's Always ON
         # policy: it protects the supply, it is not a user preference. It is
         # checked before the Smart Eco block precisely so that the "eco allows
@@ -1233,6 +1492,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             return
 
         smart_eco_active = self._is_smart_eco_enforcing()
+
+        # Smart Eco parks the mode at OFF while it blocks, and only its own
+        # restore branch below ever lifts that. Turn Smart Eco off at that
+        # moment -- or restart into it -- and the branch never runs, leaving a
+        # disinfecting tank stuck OFF until the give-up bound. Scoped to an
+        # active cycle on purpose: a tank OFF for any other reason may well be
+        # OFF because a person wants it that way, and guessing there would
+        # energise an element nobody asked for.
+        if (
+            self._disinfecting
+            and not smart_eco_active
+            and self._current_operation == STATE_OFF
+        ):
+            self._debug_log("disinfection: reclaiming a tank left parked at OFF")
+            self._current_operation = STATE_PERFORMANCE
         if smart_eco_active:
             if not self._eco_condition_met:
                 if self._current_operation != STATE_OFF:

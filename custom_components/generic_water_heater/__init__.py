@@ -43,6 +43,26 @@ SMART_ECO_MODE_UNTIL_MANUAL = "until_manual"
 SMART_ECO_MODE_AUTO_RESUME = "auto_resume"
 SMART_ECO_MODE_ALWAYS_ON = "always_on"
 
+# Disinfection policy. OFF is inert. UNTIL_DISINFECTED is a one-shot: it runs a
+# single cycle and then clears itself, so nothing ever starts again without a
+# person asking. ON is a standing policy and will re-run every time the risk
+# sensor reports the interval has lapsed.
+LEGIONELLA_MODE_OFF = "off"
+LEGIONELLA_MODE_UNTIL_DISINFECTED = "until_disinfected"
+LEGIONELLA_MODE_ON = "on"
+LEGIONELLA_MODES = (
+    LEGIONELLA_MODE_OFF,
+    LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    LEGIONELLA_MODE_ON,
+)
+
+# A goal-seeking cycle needs a calendar bound, not a wall-clock one. Most of a
+# hold is banked unpowered, coasting down over an evening, so a run-length cap
+# would abort exactly the part that earns the credit. This bounds the whole
+# request instead: if a tank cannot get there in three days it is not going to,
+# and the owner should be told rather than left burning surplus indefinitely.
+DISINFECTION_GIVE_UP_DAYS = 3
+
 LEGACY_CONF_ECO_ENTITY = "eco_entity"
 LEGACY_CONF_ECO_VALUE = "eco_value"
 
@@ -93,6 +113,16 @@ def smart_eco_signal(entry_id: str) -> str:
 def smart_eco_state_signal(entry_id: str) -> str:
     """Return dispatcher signal name for Smart Eco state updates."""
     return f"{DOMAIN}_smart_eco_state_{entry_id}"
+
+
+def legionella_signal(entry_id: str) -> str:
+    """Return dispatcher signal name for disinfection policy updates."""
+    return f"{DOMAIN}_legionella_{entry_id}"
+
+
+def legionella_risk_signal(entry_id: str) -> str:
+    """Return dispatcher signal name for Legionella risk updates."""
+    return f"{DOMAIN}_legionella_risk_{entry_id}"
 
 
 async def async_setup(hass, hass_config):

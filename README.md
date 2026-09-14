@@ -281,7 +281,48 @@ accumulates.
   between two widely spaced samples cannot claim the whole gap. Gaps longer than 30 minutes are
   treated as unobserved rather than as held temperature.
 
-### Reaching a disinfection temperature
+### Running a disinfection cycle
+
+With the risk sensor enabled, each tank also gets a **Legionella Disinfection** select:
+
+| Option | Behaviour |
+| --- | --- |
+| `Off` | Inert. The default, and what a cycle returns to when it completes. |
+| `Until disinfected` | Runs **one** cycle, then clears itself back to `Off`. Nothing ever starts again without you asking. |
+| `On` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
+
+Choosing a policy while the risk reads `Elevated` or `High` puts the tank into `performance` and
+leaves it there until the sensor reports `Low`, then hands it back to the mode it had. The cycle is
+**goal-seeking, not timed** — it is a standing request for temperature, not a fixed run.
+
+It deliberately **does not outrank anything**:
+
+- **Smart Eco still gates it.** The eco condition decides whether the tank actually heats; the cycle
+  only asks. Because the request is also written to `smart_eco_last_heating_mode`, a cycle survives
+  the nightly gap — the eco gate parks the mode at `off` and restores `performance` next time the
+  condition returns, so a cycle can span several days without anyone re-arming it.
+- **A load shed still drops it.** Shedding protects the supply and is checked first, so a balancer
+  can take the tank down mid-cycle with no special-casing. The request stays standing.
+- **A tank you switched off stays off.** A mode parked at `off` by Smart Eco is not the same thing as
+  one you turned off, and only the former is eligible to start.
+
+**Taking the tank back ends the cycle.** Changing the operation mode yourself — or turning the tank
+off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, so a standing `On`
+cannot pull the tank straight back into `performance` the moment the risk sensor next reports.
+Re-arming is one tap. Asking for `performance` yourself does *not* end a cycle, since that is what it
+already wants.
+
+If you want it to finish *faster*, pause Smart Eco yourself — that is the documented escape hatch,
+and on a tank whose element cannot reach 60 °C inside one eco window it is the only way a cycle will
+ever complete.
+
+**It gives up after three days** and tells you, via a persistent notification, how far the hold
+actually got. That bound is on the calendar rather than on run length on purpose: most of a hold is
+banked with the element already off, coasting down, so a run-length cap would abort precisely the
+part that earns the credit. A tank that has not got there in three days is not going to without
+help.
+
+`### Reaching a disinfection temperature
 
 `performance` mode heats continuously, ignoring the target, until the appliance's own mechanical
 thermostat opens — so it needs no change to `max_temp`. Two things to know:

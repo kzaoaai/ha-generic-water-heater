@@ -564,3 +564,31 @@ def test_a_restart_cannot_resume_a_hold_the_tank_has_since_lost():
     feed(resumed, [(53, 45.0)])
     assert not resumed._hold_open
     assert resumed._hold_seconds == 0.0
+
+
+def test_the_sensor_publishes_its_verdict_for_the_policy():
+    """The disinfection policy reads the risk through the entry's runtime dict.
+
+    The two are separate platforms with no reference to each other, so this
+    hand-off is the only thing connecting a completed hold to a cycle ending.
+    """
+    runtime = {}
+    sensor = LegionellaRiskSensor(
+        name="Upstairs",
+        source_sensor_entity_id="sensor.upstairs_temperature",
+        device_identifier="01JQ0000000000000000UPSTRS",
+        device_identifiers=None,
+        interval_days=7,
+        runtime=runtime,
+    )
+    feed(sensor, steady(0, 30, 60.5))
+    sensor._recalculate()
+    sensor._publish_risk()
+
+    assert runtime["legionella_risk"] == sensor.native_value
+    assert runtime["legionella_hold_progress_minutes"] == pytest.approx(30.0)
+
+
+def test_publishing_is_safe_without_a_runtime_or_hass():
+    """A sensor built standalone must not explode on the hand-off."""
+    build()._publish_risk()
