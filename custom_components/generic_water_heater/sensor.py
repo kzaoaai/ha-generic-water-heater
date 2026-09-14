@@ -89,6 +89,24 @@ KINETICS_MAX_C = 61.0
 # temperature. The two real tanks sample ~78 s and ~22 min apart respectively.
 MAX_CREDITED_GAP = timedelta(minutes=30)
 
+# A single sample below the sustain threshold is not proof the tank left
+# pasteurisation temperature. The sensor reads one point on a stratified
+# vessel, so a brief draw-off or a stratification artefact can dip it while the
+# bulk is still hot -- and a real 200 L trace came within 0.6 C of discarding a
+# five-hour hold on exactly such a dip. So one sub-sustain sample is forgiven if
+# the very next sample recovers, and only if that recovery arrives within the
+# normal sampling cadence: unobserved time is still not evidence.
+SUSTAIN_BREACH_GRACE = MAX_CREDITED_GAP
+
+# Below this, a dip is a real event rather than a bad reading, and closes the
+# hold immediately with no grace. One degree under the sustain threshold is
+# already about double the ripple amplitude the real tanks show (a 59.6-64.2 C
+# mechanical band dips ~0.4 C under 60), so forgiveness stays scoped to a single
+# implausible sample and never covers a tank that genuinely lost its heat.
+# Erring the other way would credit an hour the tank never held, and this model
+# refuses credit when in doubt.
+SUSTAIN_HARD_FLOOR_C = 58.0
+
 STATE_UNKNOWN_RISK = "Unknown"
 STATE_LOW = "Low"
 STATE_ELEVATED = "Elevated"
@@ -426,6 +444,8 @@ class LegionellaStoredData(SensorExtraStoredData):
 
     history: list[dict[str, Any]]
     last_disinfection_at: str | None
+    hold_seconds: float
+    hold_open: bool
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dict representation of the stored sensor data."""
@@ -433,6 +453,8 @@ class LegionellaStoredData(SensorExtraStoredData):
             **super().as_dict(),
             "history": self.history,
             "last_disinfection_at": self.last_disinfection_at,
+            "hold_seconds": self.hold_seconds,
+            "hold_open": self.hold_open,
         }
 
     @classmethod
@@ -450,11 +472,22 @@ class LegionellaStoredData(SensorExtraStoredData):
         if not isinstance(last, str):
             last = None
 
+        try:
+            hold_seconds = float(restored.get("hold_seconds", 0.0))
+        except (TypeError, ValueError):
+            hold_seconds = 0.0
+        if hold_seconds < 0:
+            hold_seconds = 0.0
+
+        hold_open = restored.get("hold_open") is True
+
         return cls(
             extra.native_value,
             extra.native_unit_of_measurement,
             history,
             last,
+            hold_seconds,
+            hold_open,
         )
 
 
@@ -496,6 +529,10 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         # to detect rather than reward.
         self._hold_seconds = 0.0
         self._hold_open = False
+        # Timestamp of a single sub-sustain reading awaiting confirmation. Not
+        # persisted: a restart lands with it cleared, which can at worst forgive
+        # one extra dip on a hold that the old code discarded outright.
+        self._sustain_breach_at: datetime | None = None
         self._attr_native_value = STATE_UNKNOWN_RISK
 
         # Spell the name out unless the device can supply one. Without this a
@@ -570,6 +607,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
                     self._history.append((parsed, float(item["temperature"])))
                 except (KeyError, TypeError, ValueError):
                     continue
+            self._restore_hold(stored, dt_util.utcnow())
             self._prune(dt_util.utcnow())
 
         self.async_on_remove(
@@ -587,6 +625,43 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         self._recalculate()
         self.async_write_ha_state()
 
+    @callback
+    def _restore_hold(self, stored: LegionellaStoredData, now: datetime) -> None:
+        """Resume a hold that was in flight, but only if it stayed observed.
+
+        Most of a real hold is banked with the element already off, coasting
+        down from the thermostat cutout -- a measured 200 L tank credited its
+        final minutes seven minutes after the switch turned off. Discarding that
+        progress on every restart silently threw away nearly complete hours.
+
+        A hold is only resumed when the gap across the restart is inside
+        MAX_CREDITED_GAP. Longer than that and there is no evidence the tank
+        stayed above the sustain threshold while Home Assistant was down, and
+        unobserved time must not be mistaken for held temperature.
+        """
+        if not stored.hold_open or stored.hold_seconds <= 0:
+            return
+
+        if not self._history:
+            return
+
+        gap = now - self._history[-1][0]
+        if gap > MAX_CREDITED_GAP or gap < timedelta(0):
+            _LOGGER.debug(
+                "%s: not resuming disinfection hold, %.1f minutes unobserved",
+                self.name,
+                gap.total_seconds() / 60,
+            )
+            return
+
+        self._hold_open = True
+        self._hold_seconds = stored.hold_seconds
+        _LOGGER.debug(
+            "%s: resumed disinfection hold at %.1f minutes",
+            self.name,
+            self._hold_seconds / 60,
+        )
+
     @property
     def extra_restore_state_data(self) -> LegionellaStoredData:
         """Return sensor-specific restore state data."""
@@ -600,6 +675,8 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._last_disinfection_at.isoformat()
             if self._last_disinfection_at
             else None,
+            self._hold_seconds,
+            self._hold_open,
         )
 
     async def _async_get_last_data(self) -> LegionellaStoredData | None:
@@ -637,18 +714,23 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
     def _advance_hold(self, timestamp: datetime, temperature: float) -> None:
         """Advance a hysteretic hold at the disinfection temperature."""
         if temperature < DISINFECTION_SUSTAIN_C:
-            # Fell out of the hold entirely. Discard progress rather than
-            # banking it: partial treatment is not partial credit.
-            if self._hold_open:
+            self._handle_sustain_breach(timestamp, temperature)
+            return
+
+        if self._sustain_breach_at is not None:
+            # Recovered. Forgive the dip only if it was brief enough to read as
+            # ripple rather than as the tank genuinely leaving temperature.
+            late = timestamp - self._sustain_breach_at > SUSTAIN_BREACH_GRACE
+            self._sustain_breach_at = None
+            if late and self._hold_open:
                 _LOGGER.debug(
-                    "%s: disinfection hold abandoned at %.1f minutes (%.1f C)",
+                    "%s: disinfection hold abandoned at %.1f minutes "
+                    "(recovered too late to call the dip transient)",
                     self.name,
                     self._hold_seconds / 60,
-                    temperature,
                 )
-            self._hold_open = False
-            self._hold_seconds = 0.0
-            return
+                self._hold_open = False
+                self._hold_seconds = 0.0
 
         if not self._hold_open:
             if temperature < DISINFECTION_TEMP_C:
@@ -684,6 +766,41 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._last_disinfection_at = timestamp
             self._hold_seconds = 0.0
             self._hold_open = False
+            self._sustain_breach_at = None
+
+    @callback
+    def _handle_sustain_breach(self, timestamp: datetime, temperature: float) -> None:
+        """Handle one sample below the sustain threshold.
+
+        Discarding a hold is deliberate -- partial treatment is not partial
+        credit -- but it must take more than a single reading to do it, because
+        one sensor on a stratified tank dips for reasons the bulk water does
+        not share.
+        """
+        if not self._hold_open:
+            self._sustain_breach_at = None
+            return
+
+        if temperature >= SUSTAIN_HARD_FLOOR_C and self._sustain_breach_at is None:
+            self._sustain_breach_at = timestamp
+            _LOGGER.debug(
+                "%s: disinfection hold dipped to %.1f C at %.1f minutes, "
+                "awaiting the next sample before discarding it",
+                self.name,
+                temperature,
+                self._hold_seconds / 60,
+            )
+            return
+
+        _LOGGER.debug(
+            "%s: disinfection hold abandoned at %.1f minutes (%.1f C)",
+            self.name,
+            self._hold_seconds / 60,
+            temperature,
+        )
+        self._hold_open = False
+        self._hold_seconds = 0.0
+        self._sustain_breach_at = None
 
     @callback
     def _prune(self, reference: datetime) -> None:

@@ -27,7 +27,9 @@ from custom_components.generic_water_heater.sensor import (
     STATE_HIGH,
     STATE_LOW,
     STATE_UNKNOWN_RISK,
+    SUSTAIN_HARD_FLOOR_C,
     LegionellaRiskSensor,
+    LegionellaStoredData,
 )
 
 BASE = datetime(2026, 8, 20, 2, 0, tzinfo=timezone.utc)
@@ -84,13 +86,18 @@ def test_a_hold_just_short_of_an_hour_does_not_count():
 
 
 def test_an_interrupted_hold_is_discarded_not_banked():
-    """Partial treatment is the failure mode, not partial credit."""
+    """Partial treatment is the failure mode, not partial credit.
+
+    The interruption has to show up in two consecutive samples now -- one
+    reading is not enough to throw an hour away -- but a tank that actually
+    stopped holding temperature still loses everything.
+    """
     sensor = build()
     feed(sensor, steady(0, 50, 60.5))
     assert sensor._hold_seconds > 0
 
     # Element cuts out, tank slips below the threshold, then recovers.
-    feed(sensor, [(55, 58.0)])
+    feed(sensor, [(55, 58.5), (58, 58.2)])
     assert sensor._hold_seconds == 0.0, "a partial hold survived an interruption"
 
     feed(sensor, steady(60, 100, 60.5))
@@ -387,3 +394,173 @@ def test_a_named_device_still_supplies_the_prefix():
 
     assert sensor._attr_name == "Legionella Risk"
     assert sensor._attr_has_entity_name is True
+
+
+# ---------------------------------------------------------------------------
+# One bad reading must not throw away an hour
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_sample_below_sustain_does_not_discard_the_hold():
+    """One implausible reading is not proof the tank left temperature.
+
+    The sensor reads one point on a stratified vessel over a network that has
+    dropped out repeatedly on this system. Discarding a nearly complete hold on
+    a single sample makes the whole feature hostage to one bad packet.
+    """
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+    banked = sensor._hold_seconds
+
+    feed(sensor, [(53, 58.5)])
+
+    assert sensor._hold_open, "one sample discarded the hold"
+    assert sensor._hold_seconds == pytest.approx(banked)
+
+
+def test_the_forgiven_dip_still_earns_no_credit():
+    """Forgiving a dip must not credit the time it spanned."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+    banked = sensor._hold_seconds
+
+    feed(sensor, [(53, 58.5), (56, 60.5)])
+
+    assert sensor._hold_open
+    assert sensor._hold_seconds == pytest.approx(banked), (
+        "time spanning a sub-sustain reading was credited toward the hour"
+    )
+
+
+def test_two_consecutive_samples_below_sustain_discard_the_hold():
+    """Confirmed by a second reading, the hold goes -- as it always did."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+
+    feed(sensor, [(53, 58.5), (56, 58.4)])
+
+    assert not sensor._hold_open
+    assert sensor._hold_seconds == 0.0
+
+
+def test_a_drop_well_below_sustain_discards_immediately():
+    """A degree under the sustain floor is a real event, not a bad reading."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+
+    feed(sensor, [(53, SUSTAIN_HARD_FLOOR_C - 0.1)])
+
+    assert not sensor._hold_open, "a genuine loss of heat was forgiven"
+    assert sensor._hold_seconds == 0.0
+
+
+def test_a_dip_that_recovers_too_late_discards_the_hold():
+    """Recovery outside the sampling cadence is unobserved time, not ripple."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+
+    late = 53 + MAX_CREDITED_GAP.total_seconds() / 60 + 5
+    feed(sensor, [(53, 58.5), (late, 60.5)])
+
+    assert sensor._hold_seconds == 0.0, "a dip was forgiven across unobserved time"
+
+
+def test_forgiveness_does_not_leak_into_the_next_hold():
+    """A discarded hold starts the next one from zero, grace flag cleared."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+    feed(sensor, [(53, 58.5), (56, 58.4)])
+    assert sensor._sustain_breach_at is None
+
+    feed(sensor, steady(60, 125, 60.5))
+    assert sensor._last_disinfection_at is not None
+    assert sensor._last_disinfection_at >= at(120), "credit carried over a discard"
+
+
+# ---------------------------------------------------------------------------
+# A hold in flight must survive a restart
+# ---------------------------------------------------------------------------
+
+
+def round_trip(sensor) -> LegionellaStoredData:
+    """Return the sensor's restore payload as it comes back from storage."""
+    return LegionellaStoredData.from_dict(sensor.extra_restore_state_data.as_dict())
+
+
+def test_stored_data_carries_the_hold():
+    """Without this the payload cannot describe a hold at all."""
+    sensor = build()
+    feed(sensor, steady(0, 50, 60.5))
+
+    stored = round_trip(sensor)
+
+    assert stored.hold_open is True
+    assert stored.hold_seconds == pytest.approx(50 * 60)
+
+
+def test_a_hold_survives_a_short_restart():
+    """Most of a real hold is banked coasting, with the element already off.
+
+    A measured 200 L tank credited its final minutes seven minutes after the
+    switch turned off. Dropping that progress on every restart silently threw
+    away nearly complete hours.
+    """
+    live = build()
+    feed(live, steady(0, 50, 60.5))
+    stored = round_trip(live)
+
+    resumed = build()
+    resumed._history = list(live._history)
+    resumed._restore_hold(stored, at(52))
+
+    assert resumed._hold_open
+    assert resumed._hold_seconds == pytest.approx(50 * 60)
+
+    feed(resumed, steady(55, 75, 60.5))
+    assert resumed._last_disinfection_at == at(60), (
+        "a resumed hold did not complete on the real elapsed hour"
+    )
+
+
+def test_a_hold_is_not_resumed_after_a_long_outage():
+    """Unobserved time is not evidence the tank stayed hot."""
+    live = build()
+    feed(live, steady(0, 50, 60.5))
+    stored = round_trip(live)
+
+    resumed = build()
+    resumed._history = list(live._history)
+    resumed._restore_hold(stored, at(50) + MAX_CREDITED_GAP + timedelta(minutes=5))
+
+    assert not resumed._hold_open
+    assert resumed._hold_seconds == 0.0
+
+
+def test_a_closed_hold_is_not_resurrected_by_a_restart():
+    """Nothing in flight, nothing to restore."""
+    live = build()
+    feed(live, [(0, 50.0), (5, 50.0)])
+    stored = round_trip(live)
+
+    resumed = build()
+    resumed._history = list(live._history)
+    resumed._restore_hold(stored, at(6))
+
+    assert not resumed._hold_open
+    assert resumed._hold_seconds == 0.0
+
+
+def test_a_restart_cannot_resume_a_hold_the_tank_has_since_lost():
+    """Resuming is provisional: the next real sample still gets a veto."""
+    live = build()
+    feed(live, steady(0, 50, 60.5))
+    stored = round_trip(live)
+
+    resumed = build()
+    resumed._history = list(live._history)
+    resumed._restore_hold(stored, at(52))
+    assert resumed._hold_open
+
+    feed(resumed, [(53, 45.0)])
+    assert not resumed._hold_open
+    assert resumed._hold_seconds == 0.0

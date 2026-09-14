@@ -260,7 +260,18 @@ accumulates.
   genuinely at or above 60 °C counts toward the hour — ripple keeps the window open, it does not earn
   credit. Sitting at 59.5 °C forever never opens a hold at all.
 - **An abandoned hold is discarded, never banked.** Partial treatment is the failure mode this is
-  meant to detect, not something to award partial credit for.
+  meant to detect, not something to award partial credit for. It takes **two consecutive** readings
+  below 59 °C to abandon one, though: a single implausible sample — one bad packet from a networked
+  sensor reading one point on a stratified tank — must not throw away a nearly complete hour. That
+  grace is deliberately narrow. A reading more than a degree below the sustain threshold, or a
+  recovery that arrives outside the normal sampling cadence, abandons the hold immediately, and the
+  forgiven interval earns no credit either way.
+- **A hold in flight survives a restart.** Most of a real hold is banked with the element already
+  off, coasting down from the thermostat cutout — a measured 200 L tank credited its final minutes
+  seven minutes *after* its switch turned off — so a cycle routinely spans an evening. Progress is
+  persisted and resumed, but only when the gap across the restart is inside the 30-minute observation
+  limit. Longer than that and there is no evidence the tank stayed hot while Home Assistant was down,
+  so the hold is discarded rather than resumed.
 - **Growth band is 20–50 °C**, deliberately wider than the 20–45 °C regulatory trigger: measured
   multiplication does not stop until 48.4–50.0 °C, so a tank plateauing at 47 °C is still growing.
 - **Disinfection credit** uses the published inactivation kinetics (D₅₅ = 3.47 min, z = 5.54 °C),
