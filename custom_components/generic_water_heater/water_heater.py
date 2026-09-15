@@ -516,13 +516,19 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._end_disinfection("policy turned off")
             await self._async_control_heating()
         else:
-            await self._async_evaluate_disinfection()
+            # Choosing a policy IS a person asking for heat, so it outranks a
+            # mode nobody has touched since. The interval lapsing later is not.
+            await self._async_evaluate_disinfection(user_request=True)
 
         self._notify_legionella_select()
         self.async_write_ha_state()
 
-    async def _async_evaluate_disinfection(self) -> None:
-        """Start or finish a cycle from the risk sensor's own verdict."""
+    async def _async_evaluate_disinfection(self, user_request: bool = False) -> None:
+        """Start or finish a cycle from the risk sensor's own verdict.
+
+        ``user_request`` marks the call that follows a person choosing a policy,
+        as opposed to the risk sensor reporting on its own later.
+        """
         risk = self._runtime.get("legionella_risk")
 
         if self._disinfecting:
@@ -536,23 +542,34 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if risk not in ("Elevated", "High"):
             return
 
-        # A tank a person has switched off stays off. Smart Eco parking the
-        # mode at OFF looks identical in current_operation, so separate the two
-        # rather than reading intent into a value the eco gate wrote itself.
+        # A tank a person has switched off stays off -- unless they have just
+        # asked for a cycle NOW. "Until disinfected" is a command; "On" is a
+        # standing policy, and a policy does not overrule a mode someone chose.
+        # This matters because once Smart Eco is itself switched off there is no
+        # way to tell an eco-parked OFF from a deliberate one -- and that is
+        # exactly the configuration for forcing a cycle through on a tank that
+        # cannot reach temperature inside a PV window, so swallowing the request
+        # made the documented workaround do nothing at all.
+        asked_for_now = (
+            user_request and self._legionella_mode == LEGIONELLA_MODE_UNTIL_DISINFECTED
+        )
         eco_parked = self._is_smart_eco_enforcing() and not self._eco_condition_met
-        if self._current_operation == STATE_OFF and not eco_parked:
+        if self._current_operation == STATE_OFF and not eco_parked and not asked_for_now:
             self._debug_log("disinfection: tank is off by request, not starting")
             return
 
+        # What "normal operation" means for this tank when the cycle ends. An
+        # OFF written by the eco gate is not the owner's intent, so come back to
+        # what it parked; an OFF the owner chose is, so come back to OFF.
         prior = (
-            self._current_operation
-            if self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE)
-            else self._smart_eco_last_heating_mode
+            self._smart_eco_last_heating_mode
+            if eco_parked
+            else self._current_operation
         )
         # Never stash PERFORMANCE as the mode to come back to. Reverting a
         # disinfection cycle into an unbounded performance run is the failure
         # this whole feature exists to avoid.
-        if prior != STATE_ELECTRIC:
+        if prior not in (STATE_ELECTRIC, STATE_OFF):
             prior = STATE_ELECTRIC
 
         self._disinfecting = True
@@ -590,9 +607,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if self._current_operation == STATE_PERFORMANCE:
             self._current_operation = prior
         # Also correct what the eco gate would restore, whether or not the mode
-        # is parked at OFF right now.
-        self._smart_eco_last_heating_mode = prior
-        self._runtime["smart_eco_last_heating_mode"] = prior
+        # is parked at OFF right now. That field only ever holds a heating mode,
+        # so a cycle returning the tank to OFF still has to clear the PERFORMANCE
+        # it wrote on the way in -- otherwise re-enabling Smart Eco later would
+        # restore an unbounded performance run.
+        resume_mode = prior if prior == STATE_PERFORMANCE else STATE_ELECTRIC
+        self._smart_eco_last_heating_mode = resume_mode
+        self._runtime["smart_eco_last_heating_mode"] = resume_mode
 
         one_shot_done = (
             completed and self._legionella_mode == LEGIONELLA_MODE_UNTIL_DISINFECTED
@@ -811,10 +832,12 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
             if old_state.attributes.get("disinfection_active") is True:
                 self._disinfecting = True
-                # Only ELECTRIC is ever stashed (see _async_evaluate_disinfection),
-                # so there is nothing to read back -- reading the attribute and
-                # then collapsing every value to ELECTRIC only looked like a check.
-                self._disinfection_prior_mode = STATE_ELECTRIC
+                restored_return = old_state.attributes.get("disinfection_return_mode")
+                self._disinfection_prior_mode = (
+                    restored_return
+                    if restored_return in (STATE_ELECTRIC, STATE_OFF)
+                    else STATE_ELECTRIC
+                )
                 restored_started = old_state.attributes.get("disinfection_started_at")
                 self._disinfection_started_at = (
                     restored_started

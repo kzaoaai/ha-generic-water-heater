@@ -517,3 +517,90 @@ async def test_a_finished_policy_does_not_come_back_after_a_reload(hass, world):
 
     assert hass.states.get(SELECT).state == "Off"
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# Arming the policy is itself a request for heat
+# ---------------------------------------------------------------------------
+
+
+async def eco_off(hass):
+    """Turn Smart Eco off entirely, as a person would."""
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": "select.upstairs_smart_eco_mode", "option": "Off"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+
+async def test_arming_the_policy_starts_a_cycle_on_a_tank_that_is_off(hass, world):  # noqa: F811
+    """The documented way to force a cycle through, and it did nothing.
+
+    With Smart Eco off there is no eco gate, so a tank sitting at OFF is
+    indistinguishable from one a person switched off -- and the off-by-request
+    guard swallowed the request. But choosing the policy IS the person asking,
+    so it has to outrank a mode nobody has touched since.
+    """
+    upstairs, _ = await setup_with_policy(hass)
+    await report_risk(hass, upstairs, "Elevated")
+    await eco_off(hass)
+    await hass.services.async_call(
+        "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(UPSTAIRS).state == STATE_OFF
+
+    await choose(hass, "Until disinfected")
+
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True, (
+        "arming the policy on an off tank did nothing"
+    )
+    assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
+
+
+async def test_a_cycle_started_from_off_returns_the_tank_to_off(hass, world):  # noqa: F811
+    """Reverting an off tank to ELECTRIC would leave it heating on grid.
+
+    With Smart Eco off there is nothing to stop that, so the tank would quietly
+    hold its target for ever on a cycle the person thought was one-shot.
+    """
+    upstairs, _ = await setup_with_policy(hass)
+    await report_risk(hass, upstairs, "Elevated")
+    await eco_off(hass)
+    await hass.services.async_call(
+        "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True
+    )
+    await hass.async_block_till_done()
+    await choose(hass, "Until disinfected")
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_return_mode"] == STATE_OFF
+
+    await report_risk(hass, upstairs, "Low")
+
+    assert hass.states.get(UPSTAIRS).state == STATE_OFF, (
+        "a cycle started from off left the tank heating afterwards"
+    )
+
+
+async def test_a_standing_policy_still_leaves_an_off_tank_alone(hass, world):  # noqa: F811
+    """The protection that guard existed for must survive the fix.
+
+    Arming is a request. The interval lapsing weeks later is not -- by then the
+    tank may be off because the house is empty.
+    """
+    upstairs, _ = await setup_with_policy(hass)
+    await report_risk(hass, upstairs, "Low")
+    await choose(hass, "On")
+    await eco_off(hass)
+    await hass.services.async_call(
+        "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    await report_risk(hass, upstairs, "Elevated")
+
+    assert hass.states.get(UPSTAIRS).state == STATE_OFF, (
+        "a standing policy resurrected a tank a person had switched off"
+    )
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False

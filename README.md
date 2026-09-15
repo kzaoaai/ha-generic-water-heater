@@ -303,8 +303,12 @@ It deliberately **does not outrank anything**:
   condition returns, so a cycle can span several days without anyone re-arming it.
 - **A load shed still drops it.** Shedding protects the supply and is checked first, so a balancer
   can take the tank down mid-cycle with no special-casing. The request stays standing.
-- **A tank you switched off stays off.** A mode parked at `off` by Smart Eco is not the same thing as
-  one you turned off, and only the former is eligible to start.
+- **A tank you switched off stays off — unless you ask for a cycle now.** `Until disinfected` is a
+  command and will start on an `off` tank; `On` is a standing policy and will not, because a policy
+  should not overrule a mode you chose. This distinction carries the weight once Smart Eco is itself
+  `Off`, since there is then no way to tell an eco-parked `off` from a deliberate one. A cycle
+  started from `off` returns the tank to `off`, not to `electric` — otherwise, with no eco gate left,
+  it would quietly hold its target on grid for ever after a cycle you thought was one-shot.
 
 **Taking the tank back ends the cycle.** Changing the operation mode yourself — or turning the tank
 off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, so a standing `On`
