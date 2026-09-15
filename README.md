@@ -6,7 +6,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 
 - Thermostat-style control with configurable cold and hot tolerances.
 - Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode) plus a template condition.
-- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states).
+- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states), including a one-shot bypass that resumes the policy by itself once the tank is satisfied.
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
   A switch returning from `unavailable` is **not** treated as a manual action: it is a device
@@ -188,6 +188,25 @@ High-level behavior:
 - If Smart Eco policy is actively enforcing and template is false, heating is blocked.
 - If Smart Eco policy is actively enforcing and template is true, heating is allowed.
 - If water heater mode is `off` while policy allows heating, last heating mode is restored.
+
+### Heat now, without leaving the policy off
+
+Under `Auto Resume after Delay` there is a **one-shot bypass**, and it is the plain **ON** button
+(`water_heater.turn_on`) rather than anything in the Smart Eco Mode select. It behaves differently
+from every other manual action: instead of the timed pause, Smart Eco pauses with **no deadline**,
+the tank heats on `electric` regardless of the template, and the policy **resumes by itself** once
+the tank has reached target and stayed idle for a minute. The Smart Eco State sensor reads
+`Paused until the tank is satisfied` while that is in effect.
+
+Use it when you want hot water now and do not want to remember to switch the policy back on. Turning
+the tank **off**, or changing the operation mode, takes the *timed* path instead
+(`smart_eco_manual_off_resume_hours`), which reads as a `Resuming in HH MM` countdown.
+
+**This does not work for `performance`.** That mode holds the element on unconditionally, so the
+appliance's own mechanical thermostat is what eventually stops it and Home Assistant never sees
+that — `hvac_action` stays `heating`, the tank never reads idle, and the pause would never resolve.
+For a deliberate high-temperature run, set Smart Eco Mode to `Off` yourself and set it back
+afterwards; there is no automatic restore on that path.
 
 Always ON temporary override details:
 

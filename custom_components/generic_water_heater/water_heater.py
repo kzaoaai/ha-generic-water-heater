@@ -1349,7 +1349,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             else:
                 state = countdown_state
         elif self._smart_eco_pause_reason == "manual_on_wait_idle":
-            state = "Paused by manual control"
+            # Names the mechanism, not just the cause. This pause has no timer:
+            # it ends by itself once the tank reaches target and stays idle, and
+            # a label shared with the timed pause hid that entirely.
+            state = "Paused until the tank is satisfied"
         elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
             state = "Blocked by eco condition"
         elif self._eco_condition_met and self._smart_eco_logical_heating_active():
