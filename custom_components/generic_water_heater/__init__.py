@@ -1,6 +1,7 @@
 """The generic_water_heater integration."""
 import logging
 
+from homeassistant.components.binary_sensor import DOMAIN as BINARY_SENSOR_DOMAIN
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
@@ -13,9 +14,13 @@ from .fleet import FLEET_KEY, HeaterFleet
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "generic_water_heater"
-PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SELECT_DOMAIN]
+PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SELECT_DOMAIN, BINARY_SENSOR_DOMAIN]
 
 CONF_HEATER = "heater_switch"
+# Optional external "water is flowing somewhere in the house" entity. Configuring
+# it is what creates the Hot Water In Use sensor; it is corroboration inside the
+# detector rather than a gate, because it is whole-house and this tank is not.
+CONF_WATER_IN_USE_ENTITY = "water_in_use_entity"
 CONF_SENSOR = "temperature_sensor"
 CONF_TARGET_TEMP = "target_temperature"
 CONF_TEMP_STEP = "target_temperature_step"

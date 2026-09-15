@@ -235,6 +235,48 @@ Examples:
 
 If Smart Eco policy is active and the template evaluates to false, heating is blocked even if the target would otherwise request heat.
 
+## Hot Water In Use
+
+Optional per-tank sensor, created only when you set **Water In Use Entity** in the config flow. Leave
+it empty and no entity is created.
+
+It answers a question a whole-house flow or pump signal cannot: whether hot water is being drawn
+**from this tank**. That signal fires for a cold tap, an irrigation valve, or another appliance
+entirely, and it cannot tell you which. What identifies one tank is its own temperature falling
+faster than standing loss can manage.
+
+Two tiers, because measured draws do not all separate cleanly from cooling on rate alone:
+
+| Fall rate | Verdict |
+| --- | --- |
+| ≥ 0.8 °C/min | A draw. Roughly 6× the fastest cooling ever measured on these tanks, so nothing else reaches it. Reported on the tank's evidence alone. |
+| 0.35 – 0.8 °C/min | A draw **only if** the configured water-in-use entity agrees. Real, but close enough to post-cutout cooling to be arguable on its own. |
+| < 0.35 °C/min | Not a draw. |
+
+The external entity is therefore **corroboration, not a gate**. It can break a tie; it can never veto
+an unambiguous signal from the tank. That matters in two real cases: a draw served from a pressure
+tank without engaging the pump still registers, and so does one during an outage of the pump sensor.
+The attribute `water_in_use_agrees` records what it had to say — `true`, `false`, or `null` when it
+could not say anything.
+
+Calibrated against six hand-verified draws on a real tank, which averaged 0.365 to 2.53 °C/min, and
+against the fastest passive cooling on record, 0.13 °C/min in the minutes just after a thermostat
+cutout. The regression tests replay those traces.
+
+**What it deliberately does not do:**
+
+- **No special case for the element being on.** A draw steep enough to matter outruns the roughly
+  0.15 °C/min the element adds, so one rule catches the mid-heat cases too — several of the verified
+  draws were mid-heat. The cost is that a draw which merely *cancels* heating goes undetected. The
+  alternative, treating a flat trace as a draw, rested on a single observation out of fifteen.
+- **Short draws are missed.** A fall has to last at least 45 seconds and total at least 0.8 °C. A
+  hand wash will not register; a shower will.
+- **It cannot distinguish a hot draw from anything else that cools this tank fast.** Nothing else
+  plausibly does, but that is an argument from the absence of a mechanism, not a measurement.
+
+Attributes expose the rate, the observed drop, when the draw started and both thresholds, so a
+disagreement can be argued with rather than guessed at.
+
 ## Legionella Risk Sensor
 
 An optional sensor reporting how favourable this tank's recent temperature history has been to

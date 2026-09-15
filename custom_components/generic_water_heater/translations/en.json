@@ -23,7 +23,8 @@
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor",
           "enable_legionella_sensor": "Enable Legionella Risk Sensor",
-          "legionella_interval_days": "Disinfection Interval"
+          "legionella_interval_days": "Disinfection Interval",
+          "water_in_use_entity": "Water In Use Entity (optional — creates a Hot Water In Use sensor)"
         },
         "data_description": {
           "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
@@ -34,7 +35,8 @@
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default.",
           "enable_legionella_sensor": "Adds a sensor reporting how favourable this tank's recent temperature history has been to Legionella growth, and how long since it last reached a disinfection temperature. It is a thermal-conditions index computed from ONE sensor at ONE height -- not a measurement of contamination. It cannot see the coldest water in the tank, sediment, biofilm, or any outlet downstream; only a laboratory test can tell you what is in the water. A qualifying cycle is 60 °C held for one continuous hour at the sensor. That threshold is fixed on purpose: below 60 °C a cycle is not a gentler version of the same thing and can leave the tank worse than before.",
-          "legionella_interval_days": "How long a completed disinfection cycle counts for before the sensor reports Elevated, and twice that before it reports High. Guidance that prescribes a cycle at all asks for daily in institutional systems; single-family homes are largely outside the scope of those standards, and shipped appliance controllers use anywhere from 3 to 30 days."
+          "legionella_interval_days": "How long a completed disinfection cycle counts for before the sensor reports Elevated, and twice that before it reports High. Guidance that prescribes a cycle at all asks for daily in institutional systems; single-family homes are largely outside the scope of those standards, and shipped appliance controllers use anywhere from 3 to 30 days.",
+          "water_in_use_entity": "Optional. A whole-house 'water is flowing' entity. Setting it creates a Hot Water In Use sensor for this tank. It is corroboration, not a gate: a steep temperature fall identifies this tank on its own, while this signal only settles the milder falls it cannot."
         }
       }
     }
@@ -63,7 +65,8 @@
           "enable_debug_logging": "Enable Debug Logging",
           "enable_max_temp_history_sensor": "Enable 7-day Highest Temperature Sensor",
           "enable_legionella_sensor": "Enable Legionella Risk Sensor",
-          "legionella_interval_days": "Disinfection Interval"
+          "legionella_interval_days": "Disinfection Interval",
+          "water_in_use_entity": "Water In Use Entity (optional — creates a Hot Water In Use sensor)"
         },
         "data_description": {
           "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
@@ -74,7 +77,8 @@
           "enable_debug_logging": "Logs detailed runtime diagnostics, including mode transitions, heating/idle state transitions, threshold decisions, eco condition updates, manual overrides, and switch command/cooldown reasoning. Disabled by default.",
           "enable_max_temp_history_sensor": "Adds a sensor under the same device that tracks the highest recorded temperature over the last 7 days. Disabled by default.",
           "enable_legionella_sensor": "Adds a sensor reporting how favourable this tank's recent temperature history has been to Legionella growth, and how long since it last reached a disinfection temperature. It is a thermal-conditions index computed from ONE sensor at ONE height -- not a measurement of contamination. It cannot see the coldest water in the tank, sediment, biofilm, or any outlet downstream; only a laboratory test can tell you what is in the water. A qualifying cycle is 60 °C held for one continuous hour at the sensor. That threshold is fixed on purpose: below 60 °C a cycle is not a gentler version of the same thing and can leave the tank worse than before.",
-          "legionella_interval_days": "How long a completed disinfection cycle counts for before the sensor reports Elevated, and twice that before it reports High. Guidance that prescribes a cycle at all asks for daily in institutional systems; single-family homes are largely outside the scope of those standards, and shipped appliance controllers use anywhere from 3 to 30 days."
+          "legionella_interval_days": "How long a completed disinfection cycle counts for before the sensor reports Elevated, and twice that before it reports High. Guidance that prescribes a cycle at all asks for daily in institutional systems; single-family homes are largely outside the scope of those standards, and shipped appliance controllers use anywhere from 3 to 30 days.",
+          "water_in_use_entity": "Optional. A whole-house 'water is flowing' entity. Setting it creates a Hot Water In Use sensor for this tank. It is corroboration, not a gate: a steep temperature fall identifies this tank on its own, while this signal only settles the milder falls it cannot."
         }
       }
     }

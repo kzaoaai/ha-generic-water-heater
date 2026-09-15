@@ -23,6 +23,7 @@ from . import (
     CONF_MIN_ON_DURATION,
     CONF_SENSOR,
     CONF_TEMP_MAX,
+    CONF_WATER_IN_USE_ENTITY,
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
     DOMAIN,
@@ -108,6 +109,12 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 default=current.get(CONF_ENABLE_LEGIONELLA_SENSOR, False),
             ): selector({"boolean": {}}),
             vol.Optional(
+                CONF_WATER_IN_USE_ENTITY,
+                description={
+                    "suggested_value": current.get(CONF_WATER_IN_USE_ENTITY) or None
+                },
+            ): selector({"entity": {"domain": ["binary_sensor", "input_boolean", "switch", "sensor"]}}),
+            vol.Optional(
                 CONF_LEGIONELLA_INTERVAL_DAYS,
                 default=current.get(CONF_LEGIONELLA_INTERVAL_DAYS, 7),
             ): selector(
@@ -154,6 +161,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Explicitly persist CONF_ECO_TEMPLATE as "" when cleared so it
             # overrides any value in entry.data when both are merged later.
             user_input.setdefault(CONF_ECO_TEMPLATE, "")
+            # Same reason: cleared means cleared, and clearing this one has
+            # to remove the Hot Water In Use entity rather than leave it
+            # pointed at a source the owner just detached.
+            user_input.setdefault(CONF_WATER_IN_USE_ENTITY, "")
             user_input.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
             user_input.setdefault(CONF_DEBUG_LOGGING, False)
             user_input.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
