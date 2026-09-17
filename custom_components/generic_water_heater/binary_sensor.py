@@ -18,6 +18,7 @@ from homeassistant.helpers.event import async_call_later, async_track_state_chan
 import homeassistant.util.dt as dt_util
 
 from . import (
+    CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_HEATER,
     CONF_SENSOR,
     CONF_WATER_IN_USE_ENTITY,
@@ -62,7 +63,7 @@ CORROBORATED_RATE_K_PER_MIN = 0.35
 # what was an unambiguous fall out of the certain tier into needing the
 # whole-house signal, which happened to be unavailable at the time.
 MIN_DROP_C = 0.8
-MIN_SPAN = timedelta(seconds=45)
+MIN_SPAN = timedelta(seconds=30)
 
 # How far back to look for the start of a fall. Deliberately short: a long
 # window keeps qualifying after the fall stops, because an old high sample
@@ -81,11 +82,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the Hot Water In Use sensor, if an in-use entity was configured."""
     data = {**entry.data, **getattr(entry, "options", {})}
 
-    water_in_use_entity = (data.get(CONF_WATER_IN_USE_ENTITY) or "").strip() or None
-    if water_in_use_entity is None:
-        # Nothing configured: create no entity at all, matching how the other
-        # optional entities in this integration are gated.
+    if not data.get(CONF_ENABLE_HOT_WATER_IN_USE, False):
+        # Gated on its own flag, like every other optional entity here. NOT on
+        # the water-in-use entity below: the detector's primary signal is this
+        # tank's own temperature fall, which needs no external help, so hanging
+        # the sensor's existence on a flow sensor would deny it to anyone who
+        # has no such sensor but would still get its strongest tier.
         return
+
+    water_in_use_entity = (data.get(CONF_WATER_IN_USE_ENTITY) or "").strip() or None
 
     source_sensor_entity_id = data.get(CONF_SENSOR)
     if not source_sensor_entity_id:
@@ -310,7 +315,14 @@ class HotWaterInUseBinarySensor(BinarySensorEntity):
 
     @callback
     def _corroboration(self) -> bool | None:
-        """Return whether the external in-use signal agrees, or None if it cannot say."""
+        """Return whether the external in-use signal agrees, or None if it cannot say.
+
+        None covers three cases that all mean the same thing to the detector:
+        no entity was configured, it is unavailable, or it does not exist. In
+        every one of them only the certain tier can fire.
+        """
+        if self._water_in_use_entity_id is None:
+            return None
         state = self.hass.states.get(self._water_in_use_entity_id)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return None

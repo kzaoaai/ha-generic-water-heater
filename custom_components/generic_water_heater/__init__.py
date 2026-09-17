@@ -21,6 +21,12 @@ CONF_HEATER = "heater_switch"
 # it is what creates the Hot Water In Use sensor; it is corroboration inside the
 # detector rather than a gate, because it is whole-house and this tank is not.
 CONF_WATER_IN_USE_ENTITY = "water_in_use_entity"
+# Creating the Hot Water In Use sensor hangs on this boolean, NOT on the entity
+# above. The primary signal is the tank's own temperature fall, which needs no
+# external help; the entity only unlocks the milder falls that need
+# corroborating. Gating creation on the entity would deny the detector to anyone
+# without a flow sensor, even though its strongest tier works fine for them.
+CONF_ENABLE_HOT_WATER_IN_USE = "enable_hot_water_in_use"
 CONF_SENSOR = "temperature_sensor"
 CONF_TARGET_TEMP = "target_temperature"
 CONF_TEMP_STEP = "target_temperature_step"
