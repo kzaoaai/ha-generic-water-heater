@@ -382,3 +382,61 @@ def test_an_out_of_order_sample_does_not_lose_a_real_fall():
 
     assert sensor.is_on
     assert sensor.extra_state_attributes["temperature_rate_c_per_min"] == rate
+
+
+# ---------------------------------------------------------------------------
+# Held-out data: a real shower the detector had never seen
+# ---------------------------------------------------------------------------
+
+
+# Verbatim from recorder history, upstairs tank, 2026-09-17. The tank sat flat
+# at 44.2-44.4 C for fifty minutes, then a shower started. Note the 79-second
+# sensor dropout in the middle of it -- this sensor does that.
+REAL_SHOWER = [
+    (0, 44.4), (5, 44.3), (10, 44.2), (20, 44.0), (25, 43.9), (30, 43.8), (35, 43.5),
+    # sensor drops out here for 79 s, then returns 2.3 C lower
+    (133, "unavailable"),
+    (177, 41.2), (190, 41.1), (195, 41.0), (205, 40.9), (210, 40.8), (225, 40.7),
+    (230, 40.6), (245, 40.5), (255, 40.4), (260, 40.2), (275, 40.1), (290, 40.0),
+    (295, 39.9), (310, 39.8), (320, 39.7), (325, 39.6), (340, 39.5), (345, 39.4),
+]
+
+
+def test_the_real_2026_09_17_shower_is_detected_on_its_opening():
+    """The opening of a real shower must fire on the tank's evidence alone.
+
+    Measured: 44.4 -> 43.5 C in 35 s, i.e. 1.54 C/min, nearly twice the certain
+    threshold. A 45-second span floor threw that away and pushed detection 3m40s
+    later into the corroborated tier -- where it depended on a whole-house pump
+    signal that was unavailable at that moment. With no pump agreeing, this must
+    still fire, and fire on the opening.
+    """
+    sensor = build(pump="unavailable")
+    feed(sensor, [(s, t) for s, t in REAL_SHOWER if s <= 35])
+
+    assert sensor.is_on, "the unambiguous opening of a real shower was missed"
+    assert sensor.extra_state_attributes["water_in_use_agrees"] is None
+    assert sensor.extra_state_attributes["temperature_rate_c_per_min"] >= 1.5
+
+
+def test_the_real_shower_is_still_seen_after_the_sensor_drops_out():
+    """A dropout mid-draw restarts the detector; it must pick the draw back up.
+
+    Clearing history on unavailable is deliberate -- a gap is not a plunge -- so
+    the cost is a cold restart, not a missed draw.
+    """
+    sensor = build(pump="on")
+    feed(sensor, [(s, t) for s, t in REAL_SHOWER if s <= 35])
+    sensor._async_add_sample("unavailable", at(133))
+    feed(sensor, [(s, t) for s, t in REAL_SHOWER if s >= 177])
+
+    assert sensor.is_on, "the draw was not picked back up after the dropout"
+
+
+def test_the_fifty_flat_minutes_before_it_never_fire():
+    """The same trace's quiet hour: 0.1 C dither at 44.2-44.4 must stay silent."""
+    sensor = build(pump="on")
+    dither = [44.2, 44.3, 44.2, 44.3, 44.4, 44.3, 44.4, 44.3, 44.2, 44.3, 44.4, 44.3]
+    feed(sensor, [(i * 90, v) for i, v in enumerate(dither * 3)])
+
+    assert not sensor.is_on, "sensor dither was reported as a draw"

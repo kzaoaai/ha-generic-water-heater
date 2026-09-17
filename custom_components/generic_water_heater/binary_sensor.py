@@ -53,7 +53,14 @@ CORROBORATED_RATE_K_PER_MIN = 0.35
 
 # A rate alone is not enough on a fast-reporting sensor: two samples 5 s apart
 # straddling a 0.1 K quantisation step imply 1.2 K/min from nothing. Require a
-# real excursion as well.
+# real excursion as well -- and MIN_DROP_C is what actually rejects that noise,
+# since 0.8 C is eight quantisation steps in one direction.
+#
+# MIN_SPAN is therefore only a sanity floor, and at 45 s it was costing real
+# detections. A measured shower on 2026-09-17 opened at 1.54 C/min and cleared
+# the drop in 35 s: the span floor alone delayed detection by 3m40s and pushed
+# what was an unambiguous fall out of the certain tier into needing the
+# whole-house signal, which happened to be unavailable at the time.
 MIN_DROP_C = 0.8
 MIN_SPAN = timedelta(seconds=45)
 
