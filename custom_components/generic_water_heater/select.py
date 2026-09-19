@@ -14,9 +14,11 @@ from . import (
     LEGIONELLA_MODE_OFF,
     LEGIONELLA_MODE_ON,
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    LEGIONELLA_MODE_ASAP,
     SMART_ECO_MODE_ALWAYS_ON,
     SMART_ECO_MODE_AUTO_RESUME,
     SMART_ECO_MODE_OFF,
+    SMART_ECO_MODE_OFF_UNTIL_TARGET,
     SMART_ECO_MODE_UNTIL_MANUAL,
     async_resolve_heater_device,
     legionella_signal,
@@ -25,6 +27,7 @@ from . import (
 
 _OPTION_TO_MODE = {
     "Off": SMART_ECO_MODE_OFF,
+    "Off until target reached": SMART_ECO_MODE_OFF_UNTIL_TARGET,
     "On until next manual control": SMART_ECO_MODE_UNTIL_MANUAL,
     "Auto Resume after Delay": SMART_ECO_MODE_AUTO_RESUME,
     "Always ON": SMART_ECO_MODE_ALWAYS_ON,
@@ -33,11 +36,19 @@ _MODE_TO_OPTION = {value: key for key, value in _OPTION_TO_MODE.items()}
 
 _OPTION_TO_LEGIONELLA = {
     "Off": LEGIONELLA_MODE_OFF,
-    "Until disinfected": LEGIONELLA_MODE_UNTIL_DISINFECTED,
-    "On": LEGIONELLA_MODE_ON,
+    "Disinfect": LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    "Disinfect ASAP": LEGIONELLA_MODE_ASAP,
+    "Always ON": LEGIONELLA_MODE_ON,
 }
 _LEGIONELLA_TO_OPTION = {
     value: key for key, value in _OPTION_TO_LEGIONELLA.items()
+}
+# Labels these options used to carry. A select restores from its own last
+# STATE STRING, so without this a rename silently drops the restored value and
+# the policy reads Off after an upgrade.
+_LEGACY_LEGIONELLA_OPTIONS = {
+    "Until disinfected": LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    "On": LEGIONELLA_MODE_ON,
 }
 
 
@@ -230,10 +241,11 @@ class GenericWaterHeaterLegionellaSelect(SelectEntity, RestoreEntity):
         # own history when it has not set up yet.
         if self._runtime.get("water_heater_entity") is None:
             if (old_state := await self.async_get_last_state()) is not None:
-                if old_state.state in _OPTION_TO_LEGIONELLA:
-                    self._runtime["legionella_mode"] = _OPTION_TO_LEGIONELLA[
-                        old_state.state
-                    ]
+                restored = _OPTION_TO_LEGIONELLA.get(
+                    old_state.state
+                ) or _LEGACY_LEGIONELLA_OPTIONS.get(old_state.state)
+                if restored is not None:
+                    self._runtime["legionella_mode"] = restored
 
         self._runtime["legionella_select_entity"] = self
         self.async_on_remove(

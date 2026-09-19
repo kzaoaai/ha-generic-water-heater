@@ -57,7 +57,7 @@
           },
           "legionella": {
             "name": "Legionella",
-            "description": "Thermal-conditions tracking. Reports how long since the tank last held 60 °C for an hour.",
+            "description": "Thermal-conditions tracking, and the policy select that runs a disinfection cycle. 'Disinfect' waits for the eco condition; 'Disinfect ASAP' stands Smart Eco down until the tank gets there.",
             "data": {
               "enable_legionella_sensor": "Enable Legionella Risk Sensor",
               "legionella_interval_days": "Disinfection Interval",
@@ -153,7 +153,7 @@
           },
           "legionella": {
             "name": "Legionella",
-            "description": "Thermal-conditions tracking. Reports how long since the tank last held 60 °C for an hour.",
+            "description": "Thermal-conditions tracking, and the policy select that runs a disinfection cycle. 'Disinfect' waits for the eco condition; 'Disinfect ASAP' stands Smart Eco down until the tank gets there.",
             "data": {
               "enable_legionella_sensor": "Enable Legionella Risk Sensor",
               "legionella_interval_days": "Disinfection Interval",

@@ -53,6 +53,21 @@ SMART_ECO_MODE_OFF = "off"
 SMART_ECO_MODE_UNTIL_MANUAL = "until_manual"
 SMART_ECO_MODE_AUTO_RESUME = "auto_resume"
 SMART_ECO_MODE_ALWAYS_ON = "always_on"
+# A TRANSIENT mode: eco stops gating until the demand that justified bypassing
+# it is satisfied, then the previous mode comes back on its own. Behaves like
+# OFF everywhere eco asks "am I enforcing" -- it is off, it just knows when to
+# stop being off. Bounded by smart_eco_manual_off_resume_hours so a tank that
+# never reaches target cannot leave eco disabled indefinitely, which is the
+# exact failure this mode exists to prevent.
+SMART_ECO_MODE_OFF_UNTIL_TARGET = "off_until_target"
+
+SMART_ECO_MODES = (
+    SMART_ECO_MODE_OFF,
+    SMART_ECO_MODE_UNTIL_MANUAL,
+    SMART_ECO_MODE_AUTO_RESUME,
+    SMART_ECO_MODE_ALWAYS_ON,
+    SMART_ECO_MODE_OFF_UNTIL_TARGET,
+)
 
 # Disinfection policy. OFF is inert. UNTIL_DISINFECTED is a one-shot: it runs a
 # single cycle and then clears itself, so nothing ever starts again without a
@@ -61,10 +76,19 @@ SMART_ECO_MODE_ALWAYS_ON = "always_on"
 LEGIONELLA_MODE_OFF = "off"
 LEGIONELLA_MODE_UNTIL_DISINFECTED = "until_disinfected"
 LEGIONELLA_MODE_ON = "on"
+# Same one-shot as UNTIL_DISINFECTED, but it also puts Smart Eco into
+# OFF_UNTIL_TARGET so the cycle runs on grid rather than waiting for sun.
+LEGIONELLA_MODE_ASAP = "until_disinfected_asap"
 LEGIONELLA_MODES = (
     LEGIONELLA_MODE_OFF,
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    LEGIONELLA_MODE_ASAP,
     LEGIONELLA_MODE_ON,
+)
+# The two that mean "do this now", as opposed to the standing ON policy.
+LEGIONELLA_ONE_SHOT_MODES = (
+    LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    LEGIONELLA_MODE_ASAP,
 )
 
 # A goal-seeking cycle needs a calendar bound, not a wall-clock one. Most of a
