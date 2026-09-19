@@ -6,7 +6,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 
 - Thermostat-style control with configurable cold and hot tolerances.
 - Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode) plus a template condition.
-- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states), including a one-shot bypass that resumes the policy by itself once the tank is satisfied.
+- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
   A switch returning from `unavailable` is **not** treated as a manual action: it is a device
@@ -57,6 +57,11 @@ This integration is configured from the Home Assistant UI.
 
 ## Configuration Options
 
+The config flow groups these into collapsible sections — temperatures, cycle protection, Smart
+Eco, fleet, legionella, hot water in use, advanced — with the name, switch and sensor left at the
+top. The grouping is presentation only: options are stored flat under the keys below, so YAML,
+diagnostics and anything reading the entry see no sections.
+
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `heater_switch` | entity_id | Required | The switch entity that controls the heater. |
@@ -76,6 +81,8 @@ This integration is configured from the Home Assistant UI.
 | `fleet_power_budget_w` | number | `0` | Maximum combined nominal power all instances may have switched on at once. `0` disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. |
 | `smart_eco_manual_off_resume_hours` | number (slider) | `6` | Auto-resume/override duration in hours (range: `1` to `48`). Used by Auto Resume after Delay and Always ON temporary override countdowns. |
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
+| `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
+| `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
 
 ## Fleet Load Coordination
 
@@ -179,6 +186,7 @@ When an eco template is configured, the integration exposes:
 Available Smart Eco Mode options:
 
 - `Off`: no Smart Eco policy enforcement.
+- `Off until target reached`: stands the policy down, then puts back whichever option was in force before, by itself, once the tank is satisfied. Described below.
 - `On until next manual control`: policy stops when manual control is detected.
 - `Auto Resume after Delay`: manual control pauses policy and resumes automatically after the configured delay.
 - `Always ON`: policy is enforced continuously for normal entity-level manual actions. Manual changes on the underlying switch create a temporary timed override, then enforcement resumes automatically.
@@ -205,8 +213,27 @@ the tank **off**, or changing the operation mode, takes the *timed* path instead
 **This does not work for `performance`.** That mode holds the element on unconditionally, so the
 appliance's own mechanical thermostat is what eventually stops it and Home Assistant never sees
 that — `hvac_action` stays `heating`, the tank never reads idle, and the pause would never resolve.
-For a deliberate high-temperature run, set Smart Eco Mode to `Off` yourself and set it back
-afterwards; there is no automatic restore on that path.
+For a deliberate high-temperature run, use `Off until target reached` below, which is bounded on
+time as well and so cannot hang on a tank that never reads idle.
+
+### `Off until target reached`
+
+The same idea reached from the select instead of the ON button, and available under any policy
+option rather than only `Auto Resume after Delay`. Choose it when you want hot water now regardless
+of the eco condition, and do not want to remember to switch the policy back on.
+
+- **It reverts to the option that was in force before**, not to a default. Re-selecting it while it
+  is already active does not overwrite that memory.
+- **It is bounded.** Past `smart_eco_manual_off_resume_hours` the policy comes back regardless, with
+  a persistent notification saying the tank never got there. The bound is the point: a dead element
+  or a target the tank cannot reach must not be able to leave Smart Eco disabled indefinitely, which
+  is the failure this option exists to avoid.
+- **"Target reached" means idle with no disinfection cycle still outstanding**, not simply idle.
+  `performance` never reports idle, so on that path the time bound is what ends it.
+- **It un-parks a tank Smart Eco had already switched off.** Eco parks the operation mode at `off`
+  and only its own restore branch lifts that, so without this the option would leave the tank
+  sitting off — the opposite of what it is for.
+- The Smart Eco State sensor reads `Off until the tank reaches target` while it is in effect.
 
 Always ON temporary override details:
 
@@ -237,8 +264,8 @@ If Smart Eco policy is active and the template evaluates to false, heating is bl
 
 ## Hot Water In Use
 
-Optional per-tank sensor, created only when you set **Water In Use Entity** in the config flow. Leave
-it empty and no entity is created.
+Optional per-tank sensor, created when you enable **Hot Water In Use** in the config flow. The
+water-in-use entity is corroboration rather than a prerequisite, so creation does not hang on it.
 
 It answers a question a whole-house flow or pump signal cannot: whether hot water is being drawn
 **from this tank**. That signal fires for a cold tap, an irrigation valve, or another appliance
@@ -269,7 +296,7 @@ cutout. The regression tests replay those traces.
   0.15 °C/min the element adds, so one rule catches the mid-heat cases too — several of the verified
   draws were mid-heat. The cost is that a draw which merely *cancels* heating goes undetected. The
   alternative, treating a flat trace as a draw, rested on a single observation out of fifteen.
-- **Short draws are missed.** A fall has to last at least 45 seconds and total at least 0.8 °C. A
+- **Short draws are missed.** A fall has to last at least 30 seconds and total at least 0.8 °C. A
   hand wash will not register; a shower will.
 - **It cannot distinguish a hot draw from anything else that cools this tank fast.** Nothing else
   plausibly does, but that is an argument from the absence of a mechanism, not a measurement.
@@ -349,8 +376,9 @@ With the risk sensor enabled, each tank also gets a **Legionella Disinfection** 
 | Option | Behaviour |
 | --- | --- |
 | `Off` | Inert. The default, and what a cycle returns to when it completes. |
-| `Until disinfected` | Runs **one** cycle, then clears itself back to `Off`. Nothing ever starts again without you asking. |
-| `On` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
+| `Disinfect` | Runs **one** cycle, then clears itself back to `Off`. Nothing ever starts again without you asking. |
+| `Disinfect ASAP` | The same one-shot, but it does not wait for the eco condition: starting a cycle also sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. |
+| `Always ON` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
 
 Choosing a policy while the risk reads `Elevated` or `High` puts the tank into `performance` and
 leaves it there until the sensor reports `Low`, then hands it back to the mode it had. The cycle is
@@ -358,28 +386,31 @@ leaves it there until the sensor reports `Low`, then hands it back to the mode i
 
 It deliberately **does not outrank anything**:
 
-- **Smart Eco still gates it.** The eco condition decides whether the tank actually heats; the cycle
-  only asks. Because the request is also written to `smart_eco_last_heating_mode`, a cycle survives
+- **Smart Eco still gates it — unless you asked for ASAP.** The eco condition decides whether the
+  tank actually heats; the cycle only asks. Because the request is also written to `smart_eco_last_heating_mode`, a cycle survives
   the nightly gap — the eco gate parks the mode at `off` and restores `performance` next time the
   condition returns, so a cycle can span several days without anyone re-arming it.
 - **A load shed still drops it.** Shedding protects the supply and is checked first, so a balancer
   can take the tank down mid-cycle with no special-casing. The request stays standing.
-- **A tank you switched off stays off — unless you ask for a cycle now.** `Until disinfected` is a
-  command and will start on an `off` tank; `On` is a standing policy and will not, because a policy
-  should not overrule a mode you chose. This distinction carries the weight once Smart Eco is itself
-  `Off`, since there is then no way to tell an eco-parked `off` from a deliberate one. A cycle
+- **A tank you switched off stays off — unless you ask for a cycle now.** `Disinfect` and
+  `Disinfect ASAP` are commands and will start on an `off` tank; `Always ON` is a standing policy
+  and will not, because a policy should not overrule a mode you chose. This distinction carries
+  the weight once Smart Eco is itself `Off`, since there is then no way to tell an eco-parked
+  `off` from a deliberate one. A cycle
   started from `off` returns the tank to `off`, not to `electric` — otherwise, with no eco gate left,
   it would quietly hold its target on grid for ever after a cycle you thought was one-shot.
 
 **Taking the tank back ends the cycle.** Changing the operation mode yourself — or turning the tank
-off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, so a standing `On`
-cannot pull the tank straight back into `performance` the moment the risk sensor next reports.
-Re-arming is one tap. Asking for `performance` yourself does *not* end a cycle, since that is what it
+off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, so a standing
+`Always ON` cannot pull the tank straight back into `performance` the moment the risk sensor next
+reports. Re-arming is one tap. Asking for `performance` yourself does *not* end a cycle, since that is what it
 already wants.
 
-If you want it to finish *faster*, pause Smart Eco yourself — that is the documented escape hatch,
-and on a tank whose element cannot reach 60 °C inside one eco window it is the only way a cycle will
-ever complete.
+If you want it to finish *faster*, choose `Disinfect ASAP` rather than pausing Smart Eco by hand.
+It does the same thing — stands the policy down — but through `Off until target reached`, so the
+policy is restored for you instead of waiting to be remembered. On a tank whose element cannot
+reach 60 °C inside one eco window, standing the policy down is the only way a cycle will ever
+complete.
 
 **It gives up after three days** and tells you, via a persistent notification, how far the hold
 actually got. That bound is on the calendar rather than on run length on purpose: most of a hold is
@@ -387,7 +418,7 @@ banked with the element already off, coasting down, so a run-length cap would ab
 part that earns the credit. A tank that has not got there in three days is not going to without
 help.
 
-`### Reaching a disinfection temperature
+### Reaching a disinfection temperature
 
 `performance` mode heats continuously, ignoring the target, until the appliance's own mechanical
 thermostat opens — so it needs no change to `max_temp`. Two things to know:
@@ -397,8 +428,8 @@ thermostat opens — so it needs no change to `max_temp`. Two things to know:
 - **Smart Eco can cut a session short.** Switching from `electric` to `performance` is not a heating
   boundary change, so it does not pause Smart Eco — and when the eco condition goes false the heater
   is forced off mid-session. Switching from `off` to `performance` *does* pause Smart Eco, which
-  gives an uninterrupted session. Set the heater to `off` first, or set Smart Eco to Off for the
-  duration.
+  gives an uninterrupted session. Set the heater to `off` first, or set Smart Eco to
+  `Off until target reached` for the duration.
 
 ## Acknowledgments
 
