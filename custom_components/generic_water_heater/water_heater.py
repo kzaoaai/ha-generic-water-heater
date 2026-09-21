@@ -299,6 +299,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # eco disabled for ever.
         self._smart_eco_previous_mode: str | None = None
         self._smart_eco_off_until_target_since: str | None = None
+        # Whether the OFF this mode found was written by the eco gate, decided
+        # at the moment the mode is chosen -- afterwards the gate is no longer
+        # enforcing, so the question can no longer be asked. One-shot: it
+        # un-parks once, and every OFF after that belongs to whoever wrote it.
+        self._off_until_target_reclaim = False
+        # Whether the bypass was taken out FOR a disinfection cycle, so that
+        # ending the cycle can hand it straight back.
+        self._off_until_target_for_disinfection = False
         # expose unique_id for the entity
         try:
             self._attr_unique_id = f"{DOMAIN}_{self._device_identifier}"
@@ -339,6 +347,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "disinfection_started_at": self._disinfection_started_at,
             "disinfection_return_mode": self._disinfection_prior_mode,
             "smart_eco_previous_mode": self._smart_eco_previous_mode,
+            "smart_eco_off_until_target_since": (
+                self._smart_eco_off_until_target_since
+            ),
         }
 
     @property
@@ -545,6 +556,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if risk == "Low":
                 self._end_disinfection("risk cleared", completed=True)
                 await self._async_control_heating()
+                return
+            # Upgrading a cycle that is already waiting on the eco window is
+            # the obvious thing to reach for, and this early return is what
+            # would otherwise swallow it: the bypass lives on the start path,
+            # and a cycle in flight never goes back through it.
+            if (
+                user_request
+                and self._legionella_mode == LEGIONELLA_MODE_ASAP
+                and self._smart_eco_mode != SMART_ECO_MODE_OFF_UNTIL_TARGET
+            ):
+                self._off_until_target_for_disinfection = True
+                await self.async_set_smart_eco_mode(
+                    SMART_ECO_MODE_OFF_UNTIL_TARGET, source="disinfect_asap"
+                )
+                await self._async_control_heating()
             return
 
         if self._legionella_mode == LEGIONELLA_MODE_OFF:
@@ -595,6 +621,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # transient eco mode rather than as a second bypass of its own, so
             # there is one mechanism that stands eco down and one that gives it
             # back -- and the give-back is already bounded.
+            self._off_until_target_for_disinfection = True
             self.hass.async_create_task(
                 self.async_set_smart_eco_mode(
                     SMART_ECO_MODE_OFF_UNTIL_TARGET, source="disinfect_asap"
@@ -641,6 +668,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._legionella_mode = LEGIONELLA_MODE_OFF
             self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
             self._notify_legionella_select()
+
+        if (
+            self._off_until_target_for_disinfection
+            and self._smart_eco_mode == SMART_ECO_MODE_OFF_UNTIL_TARGET
+        ):
+            # The bypass was taken out FOR this cycle, so the cycle ending is
+            # what should end it -- not the 6 h bound. Waiting for the bound is
+            # not a harmless delay: a cancelled or abandoned cycle usually
+            # leaves the tank OFF, hvac_action then reads "off" rather than
+            # "idle", and the satisfied path can never fire at all, so the full
+            # window always elapses with eco standing down for no live reason.
+            self._off_until_target_for_disinfection = False
+            self.hass.async_create_task(
+                self._async_restore_previous_eco_mode(f"cycle ended: {reason}")
+            )
 
         _LOGGER.info("%s: disinfection cycle ended (%s)", self.name, reason)
         self._debug_log("disinfection: ended (%s), back to %s", reason, prior)
@@ -750,10 +792,22 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # it must not overwrite that with itself.
             if self._smart_eco_mode != SMART_ECO_MODE_OFF_UNTIL_TARGET:
                 self._smart_eco_previous_mode = self._smart_eco_mode
+                # Decide HERE whether the OFF in front of us is the eco gate's
+                # or a person's. One line later this mode is in force, the gate
+                # is no longer enforcing, and the two are indistinguishable --
+                # which is how a reclaim ends up energising a tank somebody
+                # switched off on purpose.
+                self._off_until_target_reclaim = (
+                    self._current_operation == STATE_OFF
+                    and self._is_smart_eco_enforcing()
+                    and not self._eco_condition_met
+                )
             self._smart_eco_off_until_target_since = dt_util.utcnow().isoformat()
         else:
             self._smart_eco_previous_mode = None
             self._smart_eco_off_until_target_since = None
+            self._off_until_target_reclaim = False
+            self._off_until_target_for_disinfection = False
 
         self._smart_eco_mode = mode
         self._runtime["smart_eco_mode"] = mode
@@ -854,11 +908,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if restored_previous_eco in SMART_ECO_MODES:
                 self._smart_eco_previous_mode = restored_previous_eco
             if self._smart_eco_mode == SMART_ECO_MODE_OFF_UNTIL_TARGET:
-                # Restart the bound rather than restoring it: the stamp is not
-                # persisted, and a fresh window is the safe direction -- it can
-                # only shorten how long eco stays down, never extend it beyond
-                # one configured period after a restart.
-                self._smart_eco_off_until_target_since = dt_util.utcnow().isoformat()
+                # Restore the bound, do not restart it. Restarting always
+                # EXTENDS the bypass -- five hours in, a restart buys another
+                # full window, and a Core upgrade or a crash loop could hold
+                # Smart Eco down indefinitely one window at a time. Only fall
+                # back to now when there is no stamp to restore, which is the
+                # upgrade case: a tank already in this mode before the stamp
+                # was persisted.
+                restored_since = old_state.attributes.get(
+                    "smart_eco_off_until_target_since"
+                )
+                self._smart_eco_off_until_target_since = (
+                    restored_since
+                    if isinstance(restored_since, str)
+                    else dt_util.utcnow().isoformat()
+                )
 
             restored_legionella_mode = old_state.attributes.get("legionella_mode")
             if restored_legionella_mode in LEGIONELLA_MODES:
@@ -1464,11 +1528,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         satisfied = (
             self.hvac_action == "idle"
             and self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE)
-            # Unexercised by any test found so far: PERFORMANCE pins
-            # hvac_action to heating and a shed drives it to off, so this
-            # may be unreachable today. Kept because the intent -- never
-            # hand eco back while a cycle it was bypassed FOR is still
-            # outstanding -- should survive a cycle that runs in ELECTRIC.
+            # A shed is NOT a satisfied tank. hvac_action only reads "off" when
+            # the OPERATION MODE is off, and a shed deliberately leaves the mode
+            # alone and forces only the switch -- so a shed reads exactly like a
+            # tank that reached target. Without this, the load balancer ends the
+            # bypass on the owner's behalf. (An earlier comment here claimed a
+            # shed drives hvac_action to off. It does not.)
+            and not self._load_shed
+            # Never hand eco back while a cycle it was bypassed FOR is still
+            # outstanding. PERFORMANCE pins hvac_action to heating so this
+            # rarely decides anything, but a cycle running in ELECTRIC reaches it.
             and not self._disinfecting
         )
         if satisfied:
@@ -1529,6 +1598,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if (
             self.hvac_action == "idle"
             and self._current_operation in (STATE_ELECTRIC, STATE_PERFORMANCE)
+            and not self._load_shed
             and not self._disinfecting
         ):
             await self._async_restore_previous_eco_mode("target reached")
@@ -1691,6 +1761,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         if (
             self._smart_eco_mode == SMART_ECO_MODE_OFF_UNTIL_TARGET
+            and self._off_until_target_reclaim
             and self._current_operation == STATE_OFF
         ):
             # Same reclaim, same reason. Eco parks the mode at OFF while it
@@ -1698,11 +1769,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # mode deliberately skips. Without this, choosing "off until target
             # reached" on a tank eco had already parked would leave it sitting
             # off, the exact opposite of what was asked for.
+            #
+            # Gated and ONE-SHOT, for the reason the sibling block above gives:
+            # an unscoped version cannot tell the gate's OFF from a person's, so
+            # it would energise a tank somebody switched off, and -- worse --
+            # reverse every later turn_off for as long as the bypass lasts,
+            # making OFF unreachable. It resumes _smart_eco_last_heating_mode,
+            # which can be PERFORMANCE; that is deliberate parity with the eco
+            # restore branch below, and safe only because this fires once, in
+            # the same breath as the mode change, on a tank the gate had parked.
             resumed = self._smart_eco_last_heating_mode
             if resumed not in (STATE_ELECTRIC, STATE_PERFORMANCE):
                 resumed = STATE_ELECTRIC
             self._debug_log("off-until-target: reclaiming a tank parked at OFF")
             self._current_operation = resumed
+            self._off_until_target_reclaim = False
         if smart_eco_active:
             if not self._eco_condition_met:
                 if self._current_operation != STATE_OFF:

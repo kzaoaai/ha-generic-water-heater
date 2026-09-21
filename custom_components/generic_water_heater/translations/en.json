@@ -37,8 +37,8 @@
               "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume"
             },
             "data_description": {
-              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
-              "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption."
+              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
+              "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption. It is also the bound on 'Off until target reached': if the tank never reaches target, Smart Eco is restored after this long rather than staying down indefinitely."
             }
           },
           "fleet": {
@@ -133,8 +133,8 @@
               "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume"
             },
             "data_description": {
-              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, On until next manual control, Auto Resume after Delay, and Always ON.",
-              "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption."
+              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
+              "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption. It is also the bound on 'Off until target reached': if the tank never reaches target, Smart Eco is restored after this long rather than staying down indefinitely."
             }
           },
           "fleet": {

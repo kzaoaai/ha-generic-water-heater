@@ -261,13 +261,12 @@ async def test_eco_is_not_given_back_while_the_cycle_is_still_running(hass, worl
 async def test_a_load_shed_mid_cycle_does_not_hand_eco_back(hass, world):  # noqa: F811
     """A shed must not hand eco back while the cycle is still outstanding.
 
-    Honest note on coverage: this passes with or without the "not disinfecting"
-    clause in the revert condition. PERFORMANCE pins hvac_action to heating, and
-    a shed drives it to off rather than idle, so no case was found that actually
-    exercises that clause -- it may be unreachable today. It is kept as an
-    explicit statement of intent, not because a test proves it necessary. What
-    this test does prove is the outcome: a shed leaves both the cycle and the
-    eco bypass standing.
+    Correction to an earlier note here: a shed does NOT drive hvac_action to
+    off. It leaves the operation mode alone and forces only the switch, so it
+    reads "idle" -- which is why the shed needed a guard of its own (see
+    test_a_shed_is_not_mistaken_for_a_satisfied_tank). While a cycle is running
+    the "not disinfecting" clause covers it too, so this test passes on either
+    guard; it pins the outcome, not which clause delivers it.
     """
     from custom_components.generic_water_heater import DOMAIN, SERVICE_SHED
 
@@ -295,4 +294,220 @@ async def test_a_load_shed_mid_cycle_does_not_hand_eco_back(hass, world):  # noq
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
     assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET, (
         "a shed handed eco back while the cycle was still outstanding"
+    )
+
+
+# ---------------------------------------------------------------------------
+# What it must NOT reach for: a tank a person parked
+#
+# The reclaim exists to un-park a tank SMART ECO parked. It cannot see who
+# wrote the OFF it is looking at, and the block directly above it in the
+# control loop says exactly why that matters: "a tank OFF for any other reason
+# may well be OFF because a person wants it that way, and guessing there would
+# energise an element nobody asked for."
+# ---------------------------------------------------------------------------
+
+
+async def test_it_does_not_energise_a_tank_a_person_switched_off(hass, world):  # noqa: F811
+    """Choosing a policy is not asking for heat on a tank you switched off."""
+    await setup_both(hass)
+    with freeze_time(TRIGGER):
+        hass.states.async_set(PV_EXCESS, "on")  # eco permits heating
+        await hass.async_block_till_done()
+        await hass.services.async_call(
+            "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS).state == "off"
+
+        await eco(hass, "Off until target reached")
+
+    assert hass.states.get(UPSTAIRS).state == "off", (
+        "the bypass switched on a tank its owner had switched off"
+    )
+
+
+async def test_turning_the_tank_off_while_it_is_active_is_not_reversed(hass, world):  # noqa: F811
+    """Otherwise OFF is unreachable until the bound -- you cannot stop it."""
+    await blocked(hass)
+    await eco(hass, "Off until target reached")
+    assert hass.states.get(UPSTAIRS).state != "off"
+
+    await hass.services.async_call(
+        "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).state == "off", (
+        "the reclaim turned the tank straight back on after a manual OFF"
+    )
+
+
+async def test_turning_it_off_cannot_come_back_as_performance(hass, world):  # noqa: F811
+    """The 64 C shape, reached by switching the tank OFF.
+
+    set_operation_mode does not touch smart_eco_last_heating_mode on the OFF
+    path, so whatever was there -- possibly PERFORMANCE -- is what a reclaim
+    would resume. An unbounded performance run is the failure this integration
+    has already had once.
+    """
+    await blocked(hass)
+    await hass.services.async_call(
+        "water_heater", "set_operation_mode",
+        {"entity_id": UPSTAIRS, "operation_mode": "performance"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    await eco(hass, "Off until target reached")
+
+    await hass.services.async_call(
+        "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).state != "performance", (
+        "turning the tank off armed an unbounded performance run"
+    )
+
+
+async def test_a_shed_is_not_mistaken_for_a_satisfied_tank(hass, world):  # noqa: F811
+    """A shed leaves the operation mode intact and forces the switch off.
+
+    hvac_action only reads "off" when the OPERATION MODE is off, so a shed
+    reads "idle" -- indistinguishable from a tank that reached target. Handing
+    eco back there ends the bypass on the say-so of the load balancer.
+
+    Coverage note: two guards cover this -- one stops the 60 s timer arming,
+    one stops the revert when it fires. Removing EITHER alone still passes;
+    removing both fails. So this pins the outcome and neither guard
+    individually, which is what belt-and-braces means.
+    """
+    from custom_components.generic_water_heater import DOMAIN, SERVICE_SHED
+
+    with freeze_time(TRIGGER):
+        await blocked(hass)
+        await eco(hass, "Off until target reached")
+        await hass.services.async_call(
+            DOMAIN, SERVICE_SHED, {"entity_id": UPSTAIRS}, blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    # Cold tank: it is nowhere near satisfied, only shed. The idle timer can
+    # only arm on a control pass AFTER the shed, so drive one, then step well
+    # past the 60 s it waits -- otherwise this passes on timing, not on logic.
+    with freeze_time(TRIGGER + timedelta(minutes=5)):
+        hass.states.async_set(UPSTAIRS_SENSOR, "30.0")
+        await hass.async_block_till_done()
+    with freeze_time(TRIGGER + timedelta(minutes=7)):
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET, (
+        "a load shed was read as 'target reached' and handed eco back"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The bound has to be a real bound
+# ---------------------------------------------------------------------------
+
+
+async def test_the_bound_survives_a_restart(hass, world):  # noqa: F811
+    """Restarting the clock on every restart extends the bypass without limit.
+
+    Five hours in, a restart must not buy another full window -- and a Core
+    upgrade or a crash loop must not be able to hold Smart Eco down for ever
+    one 6 h window at a time.
+    """
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    started = (TRIGGER - timedelta(hours=5)).isoformat()
+    mock_restore_cache(
+        hass,
+        (
+            State(
+                UPSTAIRS,
+                "electric",
+                {
+                    "smart_eco_mode": SMART_ECO_MODE_OFF_UNTIL_TARGET,
+                    "smart_eco_previous_mode": SMART_ECO_MODE_AUTO_RESUME,
+                    "smart_eco_off_until_target_since": started,
+                },
+            ),
+        ),
+    )
+    with freeze_time(TRIGGER):
+        await setup_both(hass)
+        hass.states.async_set(PV_EXCESS, "off")
+        await hass.async_block_till_done()
+    assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET
+
+    # Two more hours -> seven since it actually started, past the 6 h default.
+    with freeze_time(TRIGGER + timedelta(hours=2)):
+        hass.states.async_set(UPSTAIRS_SENSOR, "30.0")
+        await hass.async_block_till_done()
+
+    assert eco_mode(hass) != SMART_ECO_MODE_OFF_UNTIL_TARGET, (
+        "the restart reset the bound, so eco stayed down past its window"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ASAP has to hold up for the whole life of a cycle, not just its start
+# ---------------------------------------------------------------------------
+
+
+async def test_switching_to_asap_mid_cycle_stands_eco_down(hass, world):  # noqa: F811
+    """Upgrading a waiting cycle to ASAP is the obvious thing to reach for.
+
+    _async_evaluate_disinfection returns early while a cycle is in flight, so
+    the eco bypass lives only on the start path -- the switch would silently
+    do nothing and the cycle would keep waiting for sun.
+    """
+    upstairs, _ = await setup_with_policy_blocked(hass)
+    await report_risk(hass, upstairs, "Elevated")
+
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "Disinfect"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert eco_mode(hass) == SMART_ECO_MODE_AUTO_RESUME
+
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET, (
+        "switching a running cycle to ASAP left it waiting for the eco window"
+    )
+
+
+async def test_cancelling_an_asap_cycle_hands_eco_back(hass, world):  # noqa: F811
+    """The bypass was taken out FOR the cycle; ending it should return it.
+
+    Waiting for the 6 h bound is not good enough: a cancelled cycle usually
+    leaves the tank OFF, and hvac_action then reads "off" rather than "idle",
+    so the satisfied path can never fire and the full window always elapses.
+    """
+    upstairs, _ = await setup_with_policy_blocked(hass)
+    await report_risk(hass, upstairs, "Elevated")
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET
+
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "Off"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+    assert eco_mode(hass) == SMART_ECO_MODE_AUTO_RESUME, (
+        "cancelling the cycle left Smart Eco standing down until the bound"
     )

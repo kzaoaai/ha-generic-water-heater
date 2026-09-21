@@ -224,15 +224,26 @@ of the eco condition, and do not want to remember to switch the policy back on.
 
 - **It reverts to the option that was in force before**, not to a default. Re-selecting it while it
   is already active does not overwrite that memory.
-- **It is bounded.** Past `smart_eco_manual_off_resume_hours` the policy comes back regardless, with
-  a persistent notification saying the tank never got there. The bound is the point: a dead element
-  or a target the tank cannot reach must not be able to leave Smart Eco disabled indefinitely, which
-  is the failure this option exists to avoid.
-- **"Target reached" means idle with no disinfection cycle still outstanding**, not simply idle.
-  `performance` never reports idle, so on that path the time bound is what ends it.
-- **It un-parks a tank Smart Eco had already switched off.** Eco parks the operation mode at `off`
-  and only its own restore branch lifts that, so without this the option would leave the tank
-  sitting off — the opposite of what it is for.
+- **It is bounded, and the bound survives a restart.** Past `smart_eco_manual_off_resume_hours` the
+  policy comes back regardless, with a persistent notification saying the tank never got there. The
+  elapsed time is persisted rather than restarted, because restarting it always *extends* the
+  bypass — five hours in, a restart would buy another full window, and a crash loop could hold the
+  policy down indefinitely one window at a time. The bound is the point: a dead element or a target
+  the tank cannot reach must not be able to leave Smart Eco disabled, which is the failure this
+  option exists to avoid.
+- **"Target reached" means idle, not shed, with no disinfection cycle still outstanding.** Three
+  conditions, because `hvac_action` only reports `off` when the *operation mode* is off: a load shed
+  leaves the mode alone and forces just the switch, so it reads `idle` and is otherwise
+  indistinguishable from a satisfied tank. Without that guard the load balancer would end your
+  bypass for you. `performance` never reports idle at all, so on that path the time bound is what
+  ends it.
+- **It un-parks a tank Smart Eco had already switched off — that tank only, once.** Eco parks the
+  operation mode at `off` and only its own restore branch lifts that, so without this the option
+  would leave the tank sitting off, the opposite of what it is for. But whether an `off` came from
+  the eco gate or from a person is decided at the moment you choose this mode and never guessed
+  afterwards: a tank *you* switched off stays off, and turning the tank off later ends the heating
+  rather than being reversed. An unscoped version of this made `off` unreachable for the whole
+  duration of the bypass.
 - The Smart Eco State sensor reads `Off until the tank reaches target` while it is in effect.
 
 Always ON temporary override details:
@@ -377,7 +388,7 @@ With the risk sensor enabled, each tank also gets a **Legionella Disinfection** 
 | --- | --- |
 | `Off` | Inert. The default, and what a cycle returns to when it completes. |
 | `Disinfect` | Runs **one** cycle, then clears itself back to `Off`. Nothing ever starts again without you asking. |
-| `Disinfect ASAP` | The same one-shot, but it does not wait for the eco condition: starting a cycle also sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. |
+| `Disinfect ASAP` | The same one-shot, but it does not wait for the eco condition: starting a cycle also sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. Switching to it while a plain `Disinfect` cycle is already waiting upgrades that cycle in place. |
 | `Always ON` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
 
 Choosing a policy while the risk reads `Elevated` or `High` puts the tank into `performance` and
@@ -405,6 +416,11 @@ off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, 
 `Always ON` cannot pull the tank straight back into `performance` the moment the risk sensor next
 reports. Re-arming is one tap. Asking for `performance` yourself does *not* end a cycle, since that is what it
 already wants.
+
+**Ending an ASAP cycle gives Smart Eco back immediately**, rather than leaving it standing down
+until the time bound. That matters because a cancelled or abandoned cycle usually leaves the tank
+off, and an off tank never reports idle — so the "target reached" path could never fire and the
+full window would always elapse with the policy down for no live reason.
 
 If you want it to finish *faster*, choose `Disinfect ASAP` rather than pausing Smart Eco by hand.
 It does the same thing — stands the policy down — but through `Off until target reached`, so the
