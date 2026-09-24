@@ -8,6 +8,7 @@ from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+import homeassistant.util.dt as dt_util
 
 from .fleet import FLEET_KEY, HeaterFleet
 
@@ -37,9 +38,7 @@ CONF_TEMP_MAX = "max_temp"
 CONF_MIN_ON_DURATION = "min_on_duration"
 CONF_MIN_OFF_DURATION = "min_off_duration"
 CONF_ECO_TEMPLATE = "eco_mode_template_condition"
-CONF_NOMINAL_POWER_W = "nominal_power_w"
 CONF_FLEET_STAGGER_SECONDS = "fleet_stagger_seconds"
-CONF_FLEET_POWER_BUDGET_W = "fleet_power_budget_w"
 CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
 CONF_ENABLE_LEGIONELLA_SENSOR = "enable_legionella_sensor"
@@ -129,8 +128,8 @@ def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:
 
     The fleet is stored under a reserved key beside the per-entry runtime dicts.
     Config entry ids are ULIDs, so FLEET_KEY cannot collide with one, and the
-    fleet deliberately outlives the unload of any individual entry -- a sibling
-    that is still running must keep seeing the watts it has committed.
+    fleet deliberately outlives the unload of any individual entry -- the
+    reload an options save triggers must not clear a sibling's stagger window.
     """
     domain_data = hass.data.setdefault(DOMAIN, {})
     fleet = domain_data.get(FLEET_KEY)
@@ -193,11 +192,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         domain_data = hass.data.get(DOMAIN, {})
         domain_data.pop(entry.entry_id, None)
 
-        # Hand back whatever share of the power budget this entry was holding,
-        # so surviving siblings can use it immediately.
+        # Belt-and-braces: unloading the platforms above already removed the
+        # entity, whose own on-remove hook unregisters it and leaves its stagger
+        # anchor behind for a reload. This repeats that with a timestamp rather
+        # than without one, so the anchor survives even if the entity path did
+        # not run -- an unregister with no `now` cannot stash.
         fleet = domain_data.get(FLEET_KEY)
         if fleet is not None:
-            fleet.unregister(entry.entry_id)
+            fleet.unregister(entry.entry_id, dt_util.utcnow())
             if fleet.is_empty and not _has_entry_runtime(domain_data):
                 domain_data.pop(FLEET_KEY, None)
     return unload_ok

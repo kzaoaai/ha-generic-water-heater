@@ -49,10 +49,8 @@ from . import (
     CONF_COLD_TOLERANCE,
     CONF_DEBUG_LOGGING,
     CONF_ECO_TEMPLATE,
-    CONF_FLEET_POWER_BUDGET_W,
     CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
-    CONF_NOMINAL_POWER_W,
     CONF_HOT_TOLERANCE,
     CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_MIN_OFF_DURATION,
@@ -84,7 +82,7 @@ from . import (
     LEGIONELLA_MODES,
     LEGIONELLA_ONE_SHOT_MODES,
 )
-from .fleet import DEFAULT_BUDGET_W, DEFAULT_NOMINAL_POWER_W, DEFAULT_STAGGER_SECONDS
+from .fleet import DEFAULT_STAGGER_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,9 +107,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     eco_template = (data.get(CONF_ECO_TEMPLATE) or "").strip() or None
     debug_logging = data.get(CONF_DEBUG_LOGGING, False)
     manual_off_resume_hours = data.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
-    nominal_power_w = data.get(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
     fleet_stagger_seconds = data.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
-    fleet_power_budget_w = data.get(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
     unit = hass.config.units.temperature_unit
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     if runtime.get("smart_eco_mode") is None:
@@ -172,9 +168,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         manual_off_resume_hours,
         config_entry_id=entry.entry_id,
         device_identifiers=device_identifiers,
-        nominal_power_w=nominal_power_w,
         fleet_stagger_seconds=fleet_stagger_seconds,
-        fleet_power_budget_w=fleet_power_budget_w,
     )
     runtime["water_heater_entity"] = entity
     async_add_entities([entity])
@@ -217,9 +211,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         manual_off_resume_hours,
         config_entry_id=None,
         device_identifiers=None,
-        nominal_power_w=DEFAULT_NOMINAL_POWER_W,
         fleet_stagger_seconds=DEFAULT_STAGGER_SECONDS,
-        fleet_power_budget_w=DEFAULT_BUDGET_W,
     ):
         """Initialize the water_heater device."""
         self.hass = hass
@@ -270,12 +262,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._cooldown_timer = None
         self._pending_switch_state = None
         self._last_debug_hvac_action = None
-        # Fleet-wide electrical admission control. Every instance funnels through
+        # Fleet-wide switch-on staggering. Every instance funnels through
         # _async_heater_turn_on, so that is where the fleet gets its say.
         self._entry_id = config_entry_id or heater_entity_id
-        self._nominal_power_w = nominal_power_w
         self._fleet_stagger_seconds = fleet_stagger_seconds
-        self._fleet_power_budget_w = fleet_power_budget_w
         self._fleet = async_get_fleet(hass)
         self._fleet_hold_reason = None
         # Load shedding is a third axis, deliberately independent of both the
@@ -336,9 +326,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "smart_eco_last_heating_mode": self._smart_eco_last_heating_mode,
             "smart_eco_state": self._runtime.get("smart_eco_state", "Off"),
             "smart_eco_condition_met": self._eco_condition_met,
-            "nominal_power_w": self._nominal_power_w,
-            "fleet_committed_power_w": self._fleet.committed_power_w,
-            "fleet_power_budget_w": self._fleet.budget_w,
             "fleet_stagger_seconds": self._fleet.stagger_seconds,
             "fleet_hold_reason": self._fleet_hold_reason,
             "load_shed": self._load_shed,
@@ -839,10 +826,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._fleet.register(
             self._entry_id,
             self.name,
-            nominal_power_w=self._nominal_power_w,
             stagger_seconds=self._fleet_stagger_seconds,
-            budget_w=self._fleet_power_budget_w,
-            wake=self._async_fleet_wake,
         )
         self.async_on_remove(self._async_fleet_unregister)
 
@@ -966,12 +950,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         ):
             self._attr_available = True
             self._last_commanded_switch_state = heater_switch.state
-            # A restart or reload loses the fleet's bookkeeping, so re-book the
-            # watts of a heater that is already running before any sibling gets
-            # a chance to ask for capacity.
-            self._fleet.note_switch_state(
-                self._entry_id, heater_switch.state == STATE_ON, dt_util.utcnow()
-            )
+            # A restart or reload loses the fleet's view of what is drawing. A
+            # heater found already ON has to open its stagger window before any
+            # sibling asks, or the sibling steps straight onto it.
+            if heater_switch.state == STATE_ON:
+                self._fleet.note_switch_on(self._entry_id, dt_util.utcnow())
+            else:
+                self._fleet.note_switch_off(self._entry_id)
 
         if self._smart_eco_pause_reason == "manual_off_timer" and self._smart_eco_resume_at:
             resume_at = dt_util.parse_datetime(self._smart_eco_resume_at)
@@ -1127,10 +1112,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         _LOGGER.debug("New switch state = %s", new_state)
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             self._attr_available = False
-            # Keep holding the watts for now -- an unavailable switch may still
-            # be drawing -- but start the clock that eventually releases them,
-            # so a heater killed at the breaker cannot starve its siblings.
-            self._fleet.note_switch_unavailable(self._entry_id, dt_util.utcnow())
         else:
             self._attr_available = True
             _LOGGER.debug("%s became Available", self.name)
@@ -1142,15 +1123,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
 
             self._last_switch_change_time = dt_util.utcnow()
-            # Book manual and externally driven flips too: they draw real watts
-            # whether or not the fleet ever admitted them. Observing the switch
-            # ON also confirms a commitment that was so far only a claim that a
-            # command had been sent.
-            self._fleet.note_switch_state(
-                self._entry_id,
-                new_state.state == STATE_ON,
-                self._last_switch_change_time,
-            )
+            # Manual and externally driven flips energise the same inverter
+            # whether or not the fleet ever admitted them.
+            if new_state.state == STATE_ON:
+                self._fleet.note_switch_on(
+                    self._entry_id, self._last_switch_change_time
+                )
+            else:
+                self._fleet.note_switch_off(self._entry_id)
             state_changed = old_state is not None and old_state.state != new_state.state
             had_pending = self._pending_switch_state is not None
 
@@ -1869,19 +1849,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._update_smart_eco_state()
         self.async_write_ha_state()
 
-    @property
-    def _fleet_deficit(self) -> float:
-        """Return how far below target this heater is, for fleet priority.
-
-        Larger means "needs heat more". Unknown temperatures rank lowest rather
-        than guessing. Note this is the raw shortfall: a PERFORMANCE (boost)
-        request already at temperature therefore ranks below an ELECTRIC heater
-        that is genuinely cold.
-        """
-        if self._current_temperature is None or self._target_temperature is None:
-            return 0.0
-        return float(self._target_temperature - self._current_temperature)
-
     @callback
     def _async_schedule_cooldown_retry(self, delay: float) -> None:
         """(Re)start the cooldown timer that retries a deferred command."""
@@ -1892,24 +1859,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         )
 
     @callback
-    def _async_fleet_wake(self) -> None:
-        """Re-evaluate now because fleet capacity may have freed up.
-
-        Called from inside a sibling's control pass, so the actual work is
-        scheduled as a task rather than run inline.
-        """
-        if self.hass is None:
-            return
-        if self._cooldown_timer:
-            self._cooldown_timer()
-            self._cooldown_timer = None
-        self._pending_switch_state = None
-        self._debug_log("fleet: woken to re-evaluate, capacity may have freed up")
-        self.hass.async_create_task(self._async_control_heating())
-
-    @callback
     def _async_fleet_unregister(self) -> None:
-        """Leave the fleet, handing back any watts still committed."""
+        """Leave the fleet, leaving its stagger anchor behind for a reload."""
         self._fleet.unregister(self._entry_id, dt_util.utcnow())
 
     async def _async_control_heating_callback(self, _now):
@@ -1945,18 +1896,18 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         heater = self.hass.states.get(self.heater_entity_id)
         if heater is not None and heater.state == STATE_ON:
-            # Already drawing. Book those watts rather than asking permission
-            # for load that sits on the inverter regardless of what we decide,
-            # otherwise a sibling could be admitted on top of it.
-            self._fleet.note_switch_state(self._entry_id, True, now)
+            # Already drawing. Tell the fleet rather than asking it for
+            # permission: the load is on the inverter regardless of what we
+            # decide, and a sibling must be spaced against it. This also makes
+            # the request below a free re-affirmation, so a running heater can
+            # never be handed a stagger hold or a retry it cannot use.
+            self._fleet.note_switch_on(self._entry_id, now)
 
-        # Fleet-wide electrical admission control. Several instances driven by
-        # one shared eco template all reach this point in the same event-loop
-        # pass, so this is the only place that can stop them stepping the
-        # inverter in one go.
-        decision = self._fleet.request_turn_on(
-            self._entry_id, now, deficit=self._fleet_deficit
-        )
+        # Fleet-wide switch-on staggering. Several instances driven by one
+        # shared eco template all reach this point in the same event-loop pass,
+        # so this is the only place that can stop them stepping the inverter in
+        # one go.
+        decision = self._fleet.request_turn_on(self._entry_id, now)
         if not decision.admitted:
             self._fleet_hold_reason = decision.reason
             self._pending_switch_state = STATE_ON
@@ -2021,10 +1972,12 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
             self._pending_switch_state = None
         self._last_commanded_switch_state = STATE_OFF
-        # Hand the committed watts back as soon as OFF is the settled intent,
-        # even when the switch is already off and no service call is needed.
+        # A deferred ON is no longer outstanding once OFF is the settled
+        # intent, so stop reporting a stagger hold for it. The element is no
+        # longer believed to be drawing either -- but its anchor stays, since it
+        # records when it last STARTED, which is what spacing is measured from.
         self._fleet_hold_reason = None
-        self._fleet.release(self._entry_id, now)
+        self._fleet.note_switch_off(self._entry_id)
         heater = self.hass.states.get(self.heater_entity_id)
         if heater is None or heater.state == STATE_OFF:
             return

@@ -14,11 +14,9 @@ from . import (
     CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
-    CONF_FLEET_POWER_BUDGET_W,
     CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
     CONF_LEGIONELLA_INTERVAL_DAYS,
-    CONF_NOMINAL_POWER_W,
         CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_HOT_TOLERANCE,
     CONF_MIN_OFF_DURATION,
@@ -32,7 +30,7 @@ from . import (
     LEGACY_CONF_ECO_ENTITY,
     LEGACY_CONF_ECO_VALUE,
 )
-from .fleet import DEFAULT_BUDGET_W, DEFAULT_NOMINAL_POWER_W, DEFAULT_STAGGER_SECONDS
+from .fleet import DEFAULT_STAGGER_SECONDS
 
 
 def _eco_template_default(config: dict) -> str:
@@ -64,11 +62,7 @@ SECTIONS: dict[str, tuple[str, ...]] = {
     ),
     "cycle_protection": (CONF_MIN_ON_DURATION, CONF_MIN_OFF_DURATION),
     "smart_eco": (CONF_ECO_TEMPLATE, CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS),
-    "fleet": (
-        CONF_NOMINAL_POWER_W,
-        CONF_FLEET_STAGGER_SECONDS,
-        CONF_FLEET_POWER_BUDGET_W,
-    ),
+    "fleet": (CONF_FLEET_STAGGER_SECONDS,),
     "legionella": (
         CONF_ENABLE_LEGIONELLA_SENSOR,
         CONF_LEGIONELLA_INTERVAL_DAYS,
@@ -143,17 +137,9 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
 
             vol.Required("fleet"): _section("fleet", {
                 vol.Optional(
-                    CONF_NOMINAL_POWER_W,
-                    default=current.get(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W),
-                ): selector({"number": {"min": 0, "max": 20000, "step": 50, "mode": "box", "unit_of_measurement": "W"}}),
-                vol.Optional(
                     CONF_FLEET_STAGGER_SECONDS,
                     default=current.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS),
                 ): selector({"number": {"min": 0, "max": 3600, "step": 5, "mode": "box", "unit_of_measurement": "s"}}),
-                vol.Optional(
-                    CONF_FLEET_POWER_BUDGET_W,
-                    default=current.get(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W),
-                ): selector({"number": {"min": 0, "max": 100000, "step": 100, "mode": "box", "unit_of_measurement": "W"}}),
             }),
 
             vol.Required("legionella"): _section("legionella", {
@@ -204,9 +190,7 @@ def _apply_cleared_and_defaults(user_input: dict) -> dict:
     flat.setdefault(CONF_WATER_IN_USE_ENTITY, "")
     flat.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
     flat.setdefault(CONF_DEBUG_LOGGING, False)
-    flat.setdefault(CONF_NOMINAL_POWER_W, DEFAULT_NOMINAL_POWER_W)
     flat.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
-    flat.setdefault(CONF_FLEET_POWER_BUDGET_W, DEFAULT_BUDGET_W)
     flat.setdefault(CONF_ENABLE_LEGIONELLA_SENSOR, False)
     flat.setdefault(CONF_LEGIONELLA_INTERVAL_DAYS, 7)
     flat.setdefault(CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR, False)

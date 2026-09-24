@@ -76,9 +76,7 @@ diagnostics and anything reading the entry see no sections.
 | `eco_mode_template_condition` | template | empty | Boolean template used by Smart Eco policy. If empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
 | `enable_legionella_sensor` | boolean | `false` | Adds the Legionella thermal-conditions sensor described below. |
 | `legionella_interval_days` | number | `7` | How long a completed disinfection cycle counts for before the sensor reports Elevated (and twice that before High). |
-| `nominal_power_w` | number | `0` | Nameplate power of this heating element, in watts. Used for fleet load admission. `0` means unknown, which makes this heater invisible to the fleet power budget. |
 | `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
-| `fleet_power_budget_w` | number | `0` | Maximum combined nominal power all instances may have switched on at once. `0` disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. |
 | `smart_eco_manual_off_resume_hours` | number (slider) | `6` | Auto-resume/override duration in hours (range: `1` to `48`). Used by Auto Resume after Delay and Always ON temporary override countdowns. |
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
@@ -91,58 +89,58 @@ react in the same Home Assistant event-loop pass. Without coordination each one 
 within milliseconds of its siblings, and a few kW of resistive load arrives as a single step. On an
 inverter or generator sized close to the house load, that step is what trips the supply.
 
-All instances share one coordinator, so they can see each other's commitments the instant they are
-made. Three rules apply, in order, to every switch-on:
+All instances share one coordinator, and it does one thing: **stagger**
+(`fleet_stagger_seconds`, default 60 s) -- no instance may switch on within N seconds of any other
+instance's switch-on. The largest value set on any instance applies to the whole fleet, so the
+resolved setting does not depend on which entry loaded first.
 
-1. **Stagger** (`fleet_stagger_seconds`, default 60 s) -- no instance may switch on within N seconds
-   of any other instance's switch-on.
-2. **Nameplate budget** (`fleet_power_budget_w`, default off) -- a switch-on is refused if it would
-   push the combined nominal power of all running instances over the budget.
-3. **Priority** -- when capacity frees up, the heater furthest below its target temperature goes
-   first. If a budget is set that cannot fit every heater at once, requests arriving in the same pass
-   are held for one second so they are ranked by temperature deficit rather than by arrival order.
+A deferred heater is never skipped. It retries on the same cooldown timer that `min_off_duration`
+uses, and the delay it is given is exactly the time remaining in the window.
 
-A refused heater is never skipped: it defers and retries on the same cooldown timer that
-`min_off_duration` uses, and it is woken immediately when a sibling releases capacity.
+The window opens when an element **starts drawing**, however that happened -- commanded here,
+flipped by a person, or found already on after a restart. An ON this integration did not command
+loads the same inverter, so a sibling still has to be spaced against it.
 
-Two deliberate design choices:
+The coordinator can only ever delay its **own** commands -- it never refuses a human. Flipping the
+physical switch works exactly as before: the override is detected and Smart Eco steps back. A heater
+that is already drawing is never delayed by its own control passes either, and re-asking does not
+push the window forward -- otherwise a switch that stopped reporting while still drawing would
+starve its sibling indefinitely.
 
-- **Nameplate, not telemetry.** Admission uses the configured `nominal_power_w`, not a power sensor.
-  Power sensors typically poll every 15-60 s, far too slow to gate a decision that has to be made in
-  the same event-loop pass that requested it. Nameplate accounting has zero latency. The trade-off is
-  that `nominal_power_w` must be kept accurate by hand -- update it if an element is rewired or its
-  power selector is moved.
-- **The budget only prevents an aggregate step.** A heater is never blocked while no other instance
-  is drawing, so a budget smaller than a single element cannot leave you with no hot water at all.
+The window also survives the reload an options save triggers. That reload is precisely the moment
+two elements could otherwise come on together, and it removes the entity, so the anchor is kept
+outside it.
 
-Manual switch-ons are counted against the budget too, since they draw real watts. The fleet can only
-ever delay its **own** commands -- it never refuses a human. Flipping the physical switch works
-exactly as before: the override is detected, Smart Eco steps back, and the watts are simply booked.
+Set `fleet_stagger_seconds` to `0` on every instance to restore the previous uncoordinated behaviour.
 
-### Commitments are reconciled, not trusted
+Current fleet state is exposed on each water heater entity as the `fleet_stagger_seconds` and
+`fleet_hold_reason` attributes. `fleet_hold_reason` names exactly why a heater is currently waiting.
 
-A commitment is booked the instant a switch-on is commanded, because waiting for the switch to
-confirm would reintroduce the very latency this feature exists to avoid. That makes every commitment
-a claim about the world, so it is checked against reality rather than trusted forever -- otherwise
-one dead relay would quietly take the whole house's hot water with it:
+### Power balancing is deliberately not done here (changed in 2.0.0)
 
-- A commanded switch that has **not been seen on within 2 minutes** loses its claim, and a warning is
-  logged naming the heater.
-- A switch that has been **unavailable for 10 minutes** loses its claim. It is held at first, because
-  it may still be drawing, but the likelier cause is that the element lost power.
-- An **unloaded config entry** keeps its watts for 60 seconds, because unloading an entry does not
-  switch its heater off. This covers the reload an options save triggers, which would otherwise be
-  the exact moment both elements could come on together.
-- A switch actually **observed on** never expires. It really is drawing.
+Until 2.0.0 this integration also ran nameplate-watt admission control: a per-instance
+`nominal_power_w`, a shared `fleet_power_budget_w`, a committed-watts pool reconciled against
+observed switch state, a grace period so an entry reload could not hand a sibling watts that were
+still energised, and priority arbitration that ranked contending heaters by temperature deficit.
 
-Whenever a claim lapses, a waiting heater is woken immediately rather than left on its retry timer.
+**Both options and all of that machinery are gone.** Deciding how much load the supply can carry
+needs visibility of the whole house, which a water heater integration does not have. A dedicated
+load balancer does, and it can carry its own per-appliance nameplates -- including the zero-latency
+part that justified nameplate accounting here in the first place, since it can veto a turn-on before
+any power sensor could react. Two systems balancing one supply from two independently-maintained sets
+of nameplates is worse than one: they disagree silently, and the one that cannot see the rest of the
+house is the one that should give way.
 
-Set `fleet_stagger_seconds` to `0` and leave `fleet_power_budget_w` at `0` on every instance to
-restore the previous uncoordinated behaviour.
+Staggering stayed because it is not the same problem. It is about the instant at which two elements
+step on together -- sequencing, not budgeting -- and it needs no nameplate to do its job.
 
-Current fleet state is exposed on each water heater entity as the `nominal_power_w`,
-`fleet_committed_power_w`, `fleet_power_budget_w`, `fleet_stagger_seconds` and `fleet_hold_reason`
-attributes. `fleet_hold_reason` names exactly why a heater is currently waiting.
+For coordinated shedding driven by a real budget, see the load-shedding services below: an external
+balancer calls `generic_water_heater.shed` and `.release`, and that is the supported way to have
+something else decide what this heater may draw.
+
+**Upgrading:** if you had a budget configured, `nominal_power_w` and `fleet_power_budget_w` stop
+having any effect and disappear from the options form. Nothing else changes, and the stagger keeps
+working with the value you already have. Move the budget to a load balancer if you need one.
 
 ## Load shedding (external load balancer integration)
 
@@ -172,7 +170,6 @@ Behaviour while shed:
   physical switch all clear the shed. A request to turn the heater *off* does not clear it; it has
   nothing to win, and clearing on an ignored OFF could switch the element back on.
 - The heater reports `load_shed: true` and a Smart Eco state of `Shed by load balancer`.
-- The shed releases the heater's share of the fleet power budget, so a sibling can use the capacity.
 
 ## Smart Eco Mode
 

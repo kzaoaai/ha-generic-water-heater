@@ -43,16 +43,12 @@
           },
           "fleet": {
             "name": "Fleet coordination",
-            "description": "Stops several heaters stepping on together. Nominal power is the PEAK draw, used for the shared watt budget.",
+            "description": "Stops several heaters stepping on together by spacing their switch-on commands apart. Power balancing itself is not done here.",
             "data": {
-              "nominal_power_w": "Nominal Power",
-              "fleet_stagger_seconds": "Fleet Stagger",
-              "fleet_power_budget_w": "Fleet Power Budget"
+              "fleet_stagger_seconds": "Fleet Stagger"
             },
             "data_description": {
-              "nominal_power_w": "The element's PEAK draw, not its average. 0 means unknown and excludes this heater from the budget.",
-              "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering.",
-              "fleet_power_budget_w": "Maximum combined nominal power that all Generic Water Heater instances may have switched on at once. 0 disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. A heater is never blocked while no other instance is drawing, so this can only prevent a combined overload, never leave you without hot water entirely."
+              "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering."
             }
           },
           "legionella": {
@@ -139,16 +135,12 @@
           },
           "fleet": {
             "name": "Fleet coordination",
-            "description": "Stops several heaters stepping on together. Nominal power is the PEAK draw, used for the shared watt budget.",
+            "description": "Stops several heaters stepping on together by spacing their switch-on commands apart. Power balancing itself is not done here.",
             "data": {
-              "nominal_power_w": "Nominal Power",
-              "fleet_stagger_seconds": "Fleet Stagger",
-              "fleet_power_budget_w": "Fleet Power Budget"
+              "fleet_stagger_seconds": "Fleet Stagger"
             },
             "data_description": {
-              "nominal_power_w": "The element's PEAK draw, not its average. 0 means unknown and excludes this heater from the budget.",
-              "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering.",
-              "fleet_power_budget_w": "Maximum combined nominal power that all Generic Water Heater instances may have switched on at once. 0 disables the budget. The smallest non-zero value set on any instance applies to the whole fleet. A heater is never blocked while no other instance is drawing, so this can only prevent a combined overload, never leave you without hot water entirely."
+              "fleet_stagger_seconds": "Minimum spacing between this heater switching on and any other Generic Water Heater instance switching on. Stops several heaters stepping onto a shared inverter or generator in the same instant when they react to the same trigger. A blocked heater waits and retries; it is never skipped. The largest value set on any instance applies to the whole fleet. 0 disables staggering."
             }
           },
           "legionella": {

@@ -222,28 +222,3 @@ async def test_shed_outranks_smart_eco_always_on(hass, world):
     assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
 
 
-async def test_shed_hands_its_watts_back_to_the_fleet(hass, world):
-    """A shed frees budget for the sibling, same as any other turn-off."""
-    with freeze_time(TRIGGER) as frozen:
-        await setup_both(hass, budget_w=2500.0, stagger_seconds=0.0)
-        hass.states.async_set(PV_EXCESS, STATE_ON)
-        await hass.async_block_till_done()
-        fleet = async_get_fleet(hass)
-
-        for _ in range(2):
-            frozen.tick(timedelta(seconds=2))
-            for entity in entities(hass).values():
-                await entity._async_control_heating()
-            await hass.async_block_till_done()
-
-        holder = next(e for e in entities(hass).values() if fleet.get(e._entry_id).committed)
-        sibling = next(e for e in entities(hass).values() if e is not holder)
-        assert fleet.committed_power_w == holder._nominal_power_w
-
-        await shed(hass, f"water_heater.{holder.name.lower()}")
-
-    # The shed heater gives its share back, and the capacity is handed straight
-    # to the sibling that was waiting on it.
-    assert fleet.get(holder._entry_id).committed is False
-    assert fleet.get(sibling._entry_id).committed is True
-    assert fleet.committed_power_w == sibling._nominal_power_w

@@ -12,16 +12,18 @@ from freezegun import freeze_time
 import pytest
 from homeassistant.components.water_heater import STATE_ELECTRIC, STATE_PERFORMANCE
 from homeassistant.const import CONF_NAME, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+import homeassistant.util.dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.generic_water_heater import (
     CONF_COLD_TOLERANCE,
     CONF_ECO_TEMPLATE,
-    CONF_FLEET_POWER_BUDGET_W,
     CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
     CONF_HOT_TOLERANCE,
-    CONF_NOMINAL_POWER_W,
     CONF_SENSOR,
     CONF_TARGET_TEMP,
     CONF_TEMP_MAX,
@@ -30,10 +32,7 @@ from custom_components.generic_water_heater import (
     DOMAIN,
     async_get_fleet,
 )
-from custom_components.generic_water_heater.fleet import (
-    UNAVAILABLE_COMMITMENT_SECONDS,
-    FLEET_KEY,
-)
+from custom_components.generic_water_heater.fleet import FLEET_KEY
 
 PV_EXCESS = "binary_sensor.pv_power_excess"
 ECO_TEMPLATE = "{{ is_state('binary_sensor.pv_power_excess', 'on') }}"
@@ -56,8 +55,6 @@ def build_entry(
     name,
     switch,
     sensor,
-    nominal_power_w,
-    budget_w=0.0,
     stagger_seconds=60.0,
     target_temp=60.0,
     cold_tolerance=0.0,
@@ -82,9 +79,7 @@ def build_entry(
             "min_on_duration": {"seconds": 0},
             "min_off_duration": {"seconds": 0},
             CONF_ECO_TEMPLATE: ECO_TEMPLATE,
-            CONF_NOMINAL_POWER_W: nominal_power_w,
             CONF_FLEET_STAGGER_SECONDS: stagger_seconds,
-            CONF_FLEET_POWER_BUDGET_W: budget_w,
             **extra,
         },
     )
@@ -128,14 +123,14 @@ def world(hass):
     return calls
 
 
-async def setup_both(hass, *, budget_w=0.0, stagger_seconds=60.0, **entry_kwargs):
+async def setup_both(hass, *, stagger_seconds=60.0, **entry_kwargs):
     """Load both config entries and return them."""
     upstairs = build_entry(
-        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 2000.0, budget_w, stagger_seconds,
+        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, stagger_seconds,
         **entry_kwargs,
     )
     downstairs = build_entry(
-        "Downstairs", DOWNSTAIRS_SWITCH, DOWNSTAIRS_SENSOR, 1300.0, budget_w, stagger_seconds,
+        "Downstairs", DOWNSTAIRS_SWITCH, DOWNSTAIRS_SENSOR, stagger_seconds,
         **entry_kwargs,
     )
     for entry in (upstairs, downstairs):
@@ -164,37 +159,11 @@ async def test_shared_eco_trigger_switches_on_one_heater_at_a_time(hass, world):
     assert len(commanded(world["turn_on"])) == 1, (
         f"both heaters stepped on at once: {commanded(world['turn_on'])}"
     )
-    assert async_get_fleet(hass).committed_power_w in (2000.0, 1300.0)
-
-
-async def test_shared_eco_trigger_respects_the_watt_budget(hass, world):
-    """Nameplate admission holds even with staggering disabled."""
-    await setup_both(hass, budget_w=2500.0, stagger_seconds=0.0)
-    world["turn_on"].clear()
-
-    with freeze_time(TRIGGER) as frozen:
-        hass.states.async_set(PV_EXCESS, STATE_ON)
-        await hass.async_block_till_done()
-
-        # Let the arbitration window close and both instances retry.
-        for _ in range(3):
-            frozen.tick(timedelta(seconds=2))
-            for entry_id in list(hass.data[DOMAIN]):
-                if entry_id == FLEET_KEY:
-                    continue
-                entity = hass.data[DOMAIN][entry_id].get("water_heater_entity")
-                if entity is not None:
-                    await entity._async_control_heating()
-            await hass.async_block_till_done()
-
-    fleet = async_get_fleet(hass)
-    assert fleet.committed_power_w <= 2500.0
-    assert len(set(commanded(world["turn_on"]))) == 1
 
 
 async def test_unloading_one_entry_leaves_the_other_running(hass, world):
     """The shared fleet must survive an individual entry unload."""
-    upstairs, downstairs = await setup_both(hass, budget_w=2500.0)
+    upstairs, downstairs = await setup_both(hass)
     fleet = async_get_fleet(hass)
     assert fleet.get(upstairs.entry_id) is not None
     assert fleet.get(downstairs.entry_id) is not None
@@ -223,18 +192,54 @@ async def test_unloading_every_entry_cleans_up_the_shared_object(hass, world):
 
 
 async def test_options_update_reloads_without_losing_the_fleet(hass, world):
-    """Changing nominal power must land on the fleet, not orphan the entry."""
+    """A changed fleet setting must land on the fleet, not orphan the entry."""
     upstairs, _ = await setup_both(hass)
 
     hass.config_entries.async_update_entry(
-        upstairs, options={**upstairs.data, CONF_NOMINAL_POWER_W: 2500.0}
+        upstairs, options={**upstairs.data, CONF_FLEET_STAGGER_SECONDS: 90.0}
     )
     await hass.async_block_till_done()
 
     fleet = async_get_fleet(hass)
     member = fleet.get(upstairs.entry_id)
     assert member is not None
-    assert member.nominal_power_w == 2500.0
+    assert member.stagger_seconds == 90.0
+    # Resolved fleet-wide to the longest any member asks for.
+    assert fleet.stagger_seconds == 90.0
+
+
+async def test_an_options_save_does_not_clear_the_stagger_window(hass, world):
+    """A real reload is unregister THEN register, which pops the member.
+
+    So state kept on the member object cannot survive it. This drives the whole
+    reload through Home Assistant rather than calling register twice, which is
+    how the first version of this test managed to pass against the bug.
+    """
+    upstairs, downstairs = await setup_both(hass)
+    fleet = async_get_fleet(hass)
+
+    with freeze_time(TRIGGER) as frozen:
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        admitted, deferred = split_by_hold(hass)
+        anchor_before = fleet.get(admitted._entry_id).last_admitted
+        assert anchor_before is not None
+
+        # Save options on the heater that was admitted: HA unloads and reloads it.
+        frozen.tick(timedelta(seconds=2))
+        entry = next(
+            e for e in (upstairs, downstairs) if e.entry_id == admitted._entry_id
+        )
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.data, CONF_FLEET_STAGGER_SECONDS: 60.0}
+        )
+        await hass.async_block_till_done()
+
+    member = fleet.get(entry.entry_id)
+    assert member is not None, "the reloaded entry never rejoined the fleet"
+    assert member.last_admitted == anchor_before, (
+        "the reload cleared the stagger window, so a sibling could step on"
+    )
 
 
 def entities(hass):
@@ -282,15 +287,10 @@ async def test_physical_switch_on_during_a_fleet_hold_is_still_honoured(hass, wo
     assert deferred._cooldown_timer is None
     assert deferred._smart_eco_pause_reason is not None
     assert not deferred._is_smart_eco_enforcing()
-    # And the watts they just added are visible to the other heater.
-    fleet = async_get_fleet(hass)
-    member = fleet.get(deferred._entry_id)
-    assert member.committed is True
-    assert fleet.committed_power_w == 3300.0
 
 
 async def test_physical_switch_off_is_not_undone_by_the_fleet(hass, world):
-    """A human's OFF must stick: no retry or sibling wake may reverse it."""
+    """A human's OFF must stick: no deferred retry may reverse it."""
     await setup_both(hass)
 
     with freeze_time(TRIGGER):
@@ -298,8 +298,6 @@ async def test_physical_switch_off_is_not_undone_by_the_fleet(hass, world):
         await hass.async_block_till_done()
 
     admitted, deferred = split_by_hold(hass)
-    fleet = async_get_fleet(hass)
-    assert fleet.get(admitted._entry_id).committed is True
     world["turn_on"].clear()
 
     # The human switches the running heater off at the wall.
@@ -312,69 +310,6 @@ async def test_physical_switch_off_is_not_undone_by_the_fleet(hass, world):
     )
     assert admitted._current_operation == STATE_OFF
     assert admitted._smart_eco_pause_reason is not None
-    # Its watts went back to the pool rather than being held by a dead commitment.
-    assert fleet.get(admitted._entry_id).committed is False
-
-
-async def test_a_manual_switch_on_is_never_refused_only_accounted(hass, world):
-    """The fleet can delay its own commands; it can never veto a human."""
-    await setup_both(hass, budget_w=100.0)  # absurdly tight, refuses everything
-    fleet = async_get_fleet(hass)
-
-    with freeze_time(TRIGGER):
-        hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
-        hass.states.async_set(DOWNSTAIRS_SWITCH, STATE_ON)
-        await hass.async_block_till_done()
-
-    # Both are booked well past the budget: accounting follows reality rather
-    # than pretending load the fleet did not authorise is not there.
-    assert fleet.committed_power_w == 3300.0
-    assert fleet.committed_power_w > fleet.budget_w
-    assert commanded(world["turn_off"]) == []
-
-
-async def test_killing_a_heater_at_the_breaker_eventually_frees_its_sibling(hass, world):
-    """A heater cut off upstream must not starve the fleet indefinitely.
-
-    Its watts are held at first -- an unavailable switch may still be drawing --
-    but the far likelier cause is that the element lost power, so the claim has
-    to lapse rather than block every sibling for ever.
-    """
-    await setup_both(hass, budget_w=2500.0)
-    fleet = async_get_fleet(hass)
-
-    with freeze_time(TRIGGER) as frozen:
-        hass.states.async_set(PV_EXCESS, STATE_ON)
-        await hass.async_block_till_done()
-        for _ in range(2):
-            frozen.tick(timedelta(seconds=2))
-            for entity in entities(hass).values():
-                await entity._async_control_heating()
-            await hass.async_block_till_done()
-
-        admitted, deferred = split_by_hold(hass)
-        assert fleet.committed_power_w == admitted._nominal_power_w
-        world["turn_on"].clear()
-
-        # Someone kills that heater at the breaker: the switch stops reporting.
-        frozen.tick(timedelta(seconds=5))
-        hass.states.async_set(admitted.heater_entity_id, STATE_UNAVAILABLE)
-        await hass.async_block_till_done()
-
-        # Still held: it might genuinely still be drawing.
-        assert fleet.committed_power_w == admitted._nominal_power_w
-        frozen.tick(timedelta(seconds=60))
-        await deferred._async_control_heating()
-        await hass.async_block_till_done()
-        assert commanded(world["turn_on"]) == []
-
-        # Once the claim lapses the sibling can heat again.
-        frozen.tick(timedelta(seconds=UNAVAILABLE_COMMITMENT_SECONDS + 10))
-        await deferred._async_control_heating()
-        await hass.async_block_till_done()
-
-    assert commanded(world["turn_on"]) == [deferred.heater_entity_id]
-    assert fleet.committed_power_w == deferred._nominal_power_w
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +412,108 @@ async def test_a_real_flip_above_the_threshold_still_promotes(hass, world):
     assert upstairs.state == STATE_PERFORMANCE, (
         "a genuine physical flip should still force heat"
     )
+
+
+async def test_an_entry_upgraded_from_1_x_still_loads(hass, world):
+    """2.0.0 removed two options; real entries out there still contain them.
+
+    This is a published integration, so every existing config entry carries
+    nominal_power_w and fleet_power_budget_w in its data. Nothing reads them any
+    more, but "nothing reads them" has to mean the entry loads, the platforms
+    come up, and the fleet still staggers -- not that setup raises on a key the
+    schema no longer declares.
+    """
+    stale = build_entry(
+        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 60.0,
+        nominal_power_w=2100.0,
+        fleet_power_budget_w=3000.0,
+    )
+    stale.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(stale.entry_id)
+    await hass.async_block_till_done()
+
+    fleet = async_get_fleet(hass)
+    member = fleet.get(stale.entry_id)
+    assert member is not None, "an upgraded entry never joined the fleet"
+    assert member.stagger_seconds == 60.0
+
+    # The dead keys are inert, not authoritative: no attribute resurrects them.
+    entity = hass.data[DOMAIN][stale.entry_id]["water_heater_entity"]
+    attrs = entity.extra_state_attributes
+    assert "nominal_power_w" not in attrs
+    assert "fleet_power_budget_w" not in attrs
+    assert "fleet_committed_power_w" not in attrs
+    assert attrs["fleet_stagger_seconds"] == 60.0
+
+
+async def test_the_options_form_ignores_the_removed_keys(hass, world):
+    """Rendering the options form for an upgraded entry must not raise.
+
+    _build_data_schema reads the current values key by key, so a key it no
+    longer knows about has to be simply unread -- and the two removals must not
+    disturb any option that survives.
+    """
+    stale = build_entry(
+        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, 90.0,
+        nominal_power_w=2100.0,
+        fleet_power_budget_w=3000.0,
+    )
+    stale.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(stale.entry_id)
+    await hass.async_block_till_done()
+
+    flow = await hass.config_entries.options.async_init(stale.entry_id)
+    assert flow["type"] == "form"
+    schema_keys = {str(k.schema) for k in flow["data_schema"].schema}
+    assert "fleet" in schema_keys
+    # The eco template is the one that matters: it has no schema default, only a
+    # suggested value, so a form that dropped it would disable Smart Eco.
+    assert "smart_eco" in schema_keys
+
+
+# ---------------------------------------------------------------------------
+# Observed switch state and the fleet: what is pinned, and what is not
+#
+# fleet.py's note_switch_on / note_switch_off semantics are covered in
+# test_fleet.py. The three WIRING sites in water_heater.py that call them are
+# deliberately NOT claimed to be covered here, and an honest account of why is
+# worth more than a test that looks like coverage:
+#
+#   * Removing all three leaves this suite green. That is not laziness in the
+#     tests -- it is that a heater which is drawing normally anchors itself. If
+#     the integration wants the element on, its own control pass calls
+#     request_turn_on and is admitted, which opens the window; if it does not
+#     want it on, it turns the switch off. Either way the wiring is not what
+#     produces the observable outcome.
+#   * What the wiring actually buys is the in-pass ordering race: two entities
+#     run their control passes in one event-loop pass, and without it the one
+#     that asks first cannot see that its sibling's element is ALREADY on. That
+#     is the 2026-08-18 shape, and it is sub-millisecond -- there is no way to
+#     stage it from a test that awaits async_block_till_done.
+#
+# So the wiring is kept as the pre-2.0.0 design had it, and this comment is the
+# record that it is reasoned about rather than measured. A first attempt at
+# "wiring tests" here passed with every call site deleted; deleting them beat
+# leaving three tests that implied a guarantee they did not give.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_deferred_sibling_still_gets_its_turn_after_the_window(hass, world):
+    """Whatever opened the window, a delay must never become a stranding."""
+    await setup_both(hass)
+    world["turn_on"].clear()
+
+    with freeze_time(TRIGGER) as frozen:
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        admitted, deferred = split_by_hold(hass)
+        assert deferred.heater_entity_id not in commanded(world["turn_on"])
+
+        frozen.tick(timedelta(seconds=61))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+    assert deferred.heater_entity_id in commanded(world["turn_on"]), (
+        "the deferred sibling never got its turn"
+    )
+    assert deferred._fleet_hold_reason is None
