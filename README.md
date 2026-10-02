@@ -205,6 +205,21 @@ High-level behavior:
 - If Smart Eco policy is actively enforcing and template is true, heating is allowed.
 - If water heater mode is `off` while policy allows heating, last heating mode is restored.
 
+### After a Home Assistant restart
+
+At startup the eco template's source entities may not have loaded yet, and a sensor with a delay
+reads a plausible `off` until the delay passes. Such a condition can't be evaluated yet; it isn't
+false. So for 2 minutes after Home Assistant finishes starting, a **false** condition doesn't park
+the tank. The heater keeps the mode it had before the restart and controls to target as before,
+with Smart Eco State reading `Starting up`. A **true** condition is acted on at once. When the
+window ends, the condition is enforced as usual. The window is time-bounded, so a source that never
+comes back can't keep eco bypassed.
+
+In the same window, switch changes are not taken as a person acting on the switch. Devices
+reconnecting after a restart can replay states, and one replayed `on` used to start a manual eco
+pause. The control loop puts the switch back where it should be. A config-entry reload while Home
+Assistant is running gets no window, because its sources are already loaded.
+
 ### Heat now, without leaving the policy off
 
 Under `Auto Resume after Delay` there is a **one-shot bypass**, and it is the plain **ON** button

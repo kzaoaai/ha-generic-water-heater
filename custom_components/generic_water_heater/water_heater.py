@@ -22,7 +22,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import DOMAIN as HA_DOMAIN, Event, EventStateChangedData, callback
+from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, Event, EventStateChangedData, callback
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers.event import (
     TrackTemplate,
@@ -32,6 +32,7 @@ from homeassistant.helpers.event import (
     async_track_template_result,
 )
 from homeassistant.helpers import entity_platform
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -86,6 +87,14 @@ from .fleet import DEFAULT_STAGGER_SECONDS
 from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long after Home Assistant finishes starting the eco gate is not allowed to
+# park a tank. At startup the template's source entities may not exist yet, and
+# a sensor with a delay_on reads a plausible "off" until the delay passes -- on
+# 2026-10-02 a PV-excess sensor took ~70 s after load to report its real value.
+# A condition that cannot be evaluated is not a condition that is false. The
+# window is bounded so a template whose source never returns cannot bypass eco.
+STARTUP_GRACE = timedelta(minutes=2)
 
 DEFAULT_NAME = "Generic Water Heater"
 
@@ -247,6 +256,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._smart_eco_countdown_timer = None
         self._debug_logging = bool(debug_logging)
         self._eco_condition_met = False
+        self._startup_grace_active = False
         self._unit_of_measurement = unit
         self._current_operation = STATE_ELECTRIC
         self._current_temperature = None
@@ -842,6 +852,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
         )
 
+        if self.hass.state is not CoreState.running:
+            # Only a Home Assistant start. A config-entry reload happens with
+            # every source entity already loaded, so it needs no grace.
+            self._startup_grace_active = True
+            self.async_on_remove(
+                async_at_started(self.hass, self._async_begin_startup_grace)
+            )
+
         if self._eco_template:
             info = async_track_template_result(
                 self.hass,
@@ -1059,6 +1077,24 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         await self._async_control_heating()
 
     @callback
+    def _async_begin_startup_grace(self, _hass) -> None:
+        """Start the grace countdown once every integration has loaded."""
+        self.async_on_remove(
+            async_call_later(
+                self.hass,
+                STARTUP_GRACE.total_seconds(),
+                self._async_startup_grace_expired,
+            )
+        )
+
+    async def _async_startup_grace_expired(self, _now) -> None:
+        """Hand the tank back to the eco gate."""
+        self._startup_grace_active = False
+        self._debug_log("startup grace over; eco condition now enforced")
+        self._update_smart_eco_state()
+        await self._async_control_heating()
+
+    @callback
     def _async_refresh_eco_condition(self, result=None):
         """Refresh the current eco condition state."""
         previous = self._eco_condition_met
@@ -1168,7 +1204,19 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 STATE_UNKNOWN,
             )
 
-            if returned_from_unavailable:
+            if self._startup_grace_active and state_changed:
+                # A device reconnecting after a restart can replay states: on
+                # 2026-10-02 a relay reported on then off within 250 ms, with no
+                # command behind either, and the ON started a 3-hour manual eco
+                # pause. Nothing during startup can be told apart from that, so
+                # nothing during startup is a person. The control loop re-asserts
+                # what the switch should be; after the window, flips count again.
+                self._debug_log(
+                    "switch changed to %s during startup grace; not treating as manual intent",
+                    new_state.state,
+                )
+                self.hass.async_create_task(self._async_control_heating())
+            elif returned_from_unavailable:
                 self._debug_log(
                     "switch reappeared as %s after %s; not treating as manual intent",
                     new_state.state,
@@ -1441,6 +1489,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # it ends by itself once the tank reaches target and stays idle, and
             # a label shared with the timed pause hid that entirely.
             state = "Paused until the tank is satisfied"
+        elif self._is_smart_eco_enforcing() and self._startup_grace_active and not self._eco_condition_met:
+            state = "Starting up"
         elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
             state = "Blocked by eco condition"
         elif self._eco_condition_met and self._smart_eco_logical_heating_active():
@@ -1767,7 +1817,12 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._debug_log("off-until-target: reclaiming a tank parked at OFF")
             self._current_operation = resumed
             self._off_until_target_reclaim = False
-        if smart_eco_active:
+        if smart_eco_active and self._startup_grace_active and not self._eco_condition_met:
+            # Neither park nor restore: the mode restored from before the
+            # restart stands, and controls to target as it did then. A true
+            # condition is trusted at once -- only a false one is suspect.
+            self._debug_log("decision: startup grace, eco condition not yet trusted -> keeping %s", self._current_operation)
+        elif smart_eco_active:
             if not self._eco_condition_met:
                 if self._current_operation != STATE_OFF:
                     self._debug_log("decision: smart eco blocks heating -> setting operation mode OFF")
