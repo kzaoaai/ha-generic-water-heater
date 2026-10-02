@@ -83,6 +83,7 @@ from . import (
     LEGIONELLA_ONE_SHOT_MODES,
 )
 from .fleet import DEFAULT_STAGGER_SECONDS
+from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -831,8 +832,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self.async_on_remove(self._async_fleet_unregister)
 
         self.async_on_remove(
-            async_track_state_change_event(
-                self.hass, [self.sensor_entity_id], self._async_sensor_changed
+            async_track_filtered_temperature(
+                self.hass, self.sensor_entity_id, self._async_sensor_changed
             )
         )
         self.async_on_remove(
@@ -1023,10 +1024,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._smart_eco_countdown_timer = None
         await super().async_will_remove_from_hass()
 
-    async def _async_sensor_changed(self, event):
-        """Handle temperature changes."""
-        new_state = event.data.get("new_state")
-        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+    async def _async_sensor_changed(self, value, _when, _attributes):
+        """Handle a temperature reading that survived the spike filter."""
+        if value is None or value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             # Failsafe
             _LOGGER.warning(
                 "No Temperature information, entering Failsafe, turning off heater %s",
@@ -1035,7 +1035,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             await self._async_heater_turn_off()
             self._current_temperature = None
         else:
-            self._current_temperature = float(new_state.state)
+            try:
+                self._current_temperature = float(value)
+            except (TypeError, ValueError):
+                return
 
         _LOGGER.debug(
             "%s: sensor changed -> current_temperature=%s, target=%s, cold_tolerance=%s, hot_tolerance=%s",

@@ -355,7 +355,7 @@ async def test_a_stale_startup_reading_cannot_anchor_a_fall(monkeypatch):
     the bug, because it never entered the code under test.
     """
     monkeypatch.setattr(
-        binary_sensor_module, "async_track_state_change_event", lambda *a, **k: (lambda: None)
+        binary_sensor_module, "async_track_filtered_temperature", lambda *a, **k: (lambda: None)
     )
     now = dt_util.utcnow()
     sensor = build()

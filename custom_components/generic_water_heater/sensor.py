@@ -12,8 +12,7 @@ from homeassistant.components.sensor import (
     SensorExtraStoredData,
 )
 from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, EventStateChangedData, callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -33,6 +32,7 @@ from . import (
     legionella_risk_signal,
     smart_eco_state_signal,
 )
+from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
 _WINDOW = timedelta(days=7)
@@ -369,9 +369,9 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
             self._recalculate_state()
 
         self.async_on_remove(
-            async_track_state_change_event(
+            async_track_filtered_temperature(
                 self.hass,
-                [self._source_sensor_entity_id],
+                self._source_sensor_entity_id,
                 self._async_source_sensor_changed,
             )
         )
@@ -389,16 +389,17 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         return MaxTemperatureHistoryStoredData.from_dict(restored.as_dict())
 
     @callback
-    def _async_source_sensor_changed(self, event: Event[EventStateChangedData]) -> None:
-        """Handle source temperature sensor updates."""
-        new_state = event.data.get("new_state")
-        if new_state is None:
+    def _async_source_sensor_changed(
+        self, value: Any, when: datetime, attributes: dict[str, Any]
+    ) -> None:
+        """Handle a temperature reading that survived the spike filter."""
+        if value is None:
             return
 
         self._async_add_state_sample(
-            new_state.state,
-            new_state.attributes.get("unit_of_measurement"),
-            event.time_fired,
+            value,
+            attributes.get("unit_of_measurement"),
+            when,
         )
         self.async_write_ha_state()
 
@@ -620,9 +621,9 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._prune(dt_util.utcnow())
 
         self.async_on_remove(
-            async_track_state_change_event(
+            async_track_filtered_temperature(
                 self.hass,
-                [self._source_sensor_entity_id],
+                self._source_sensor_entity_id,
                 self._async_source_sensor_changed,
             )
         )
@@ -719,12 +720,13 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         return LegionellaStoredData.from_dict(restored.as_dict())
 
     @callback
-    def _async_source_sensor_changed(self, event: Event[EventStateChangedData]) -> None:
-        """Handle source temperature sensor updates."""
-        new_state = event.data.get("new_state")
-        if new_state is None:
+    def _async_source_sensor_changed(
+        self, value: Any, when: datetime, _attributes: dict[str, Any]
+    ) -> None:
+        """Handle a temperature reading that survived the spike filter."""
+        if value is None:
             return
-        self._async_add_sample(new_state.state, event.time_fired)
+        self._async_add_sample(value, when)
         self._recalculate()
         self._publish_risk()
         self.async_write_ha_state()

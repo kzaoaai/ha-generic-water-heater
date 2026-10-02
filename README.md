@@ -39,6 +39,17 @@ Operation behavior:
 - `performance` (Boost): prioritizes heating.
 - Smart Eco Mode: applies policy behavior described below.
 
+### Sensor glitch filtering
+
+A single reading more than 10 °C away from the previous one is held back until the next reading
+decides it. If the temperature comes back, the outlier is dropped. If it stays, the reading is
+accepted with its original timestamp, and so is any reading not contradicted within 60 seconds.
+No tank changes that much between two reports, but some combined relay and temperature devices
+report one wild value as their relay switches. Before this filter, one such reading could switch
+the element, trigger Hot Water In Use, enter the 7-day maximum, or discard a disinfection hold that
+was nearly complete. `unavailable` and `unknown` are never delayed, so the failsafe still turns the
+element off at once.
+
 ## Installation
 
 1. Open HACS in Home Assistant.
