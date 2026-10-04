@@ -34,6 +34,36 @@ UPSTAIRS = "water_heater.upstairs"
 START = datetime(2026, 10, 2, 10, 57, 35, tzinfo=timezone.utc)
 
 
+COMMAND_CAP = 20
+
+
+def cap_switch_commands(hass, world):  # noqa: F811
+    """Stop reflecting switch commands after COMMAND_CAP of them.
+
+    The world fixture's switch reports instantly, so a regression that makes
+    the override path and the control loop chase each other spins for ever
+    instead of failing. Capped, it stops and the assertions below say why.
+    """
+    from homeassistant.const import STATE_OFF, STATE_ON
+
+    count = {"n": 0}
+
+    def _make(state, key):
+        async def _handler(call):
+            world[key].append(call)
+            count["n"] += 1
+            if count["n"] > COMMAND_CAP:
+                return
+            entity_id = call.data.get("entity_id")
+            for eid in [entity_id] if isinstance(entity_id, str) else list(entity_id or []):
+                hass.states.async_set(eid, state)
+        return _handler
+
+    hass.services.async_register("homeassistant", "turn_on", _make(STATE_ON, "turn_on"))
+    hass.services.async_register("homeassistant", "turn_off", _make(STATE_OFF, "turn_off"))
+    return count
+
+
 def heater(hass):
     return hass.states.get(UPSTAIRS)
 
@@ -129,6 +159,7 @@ async def test_a_relay_replaying_states_at_startup_is_not_a_person(hass, world):
     with freeze_time(START):
         await start_heating_tank(hass)
         await finish_starting(hass)
+        commands = cap_switch_commands(hass, world)
         hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
         hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
         await hass.async_block_till_done()
@@ -136,6 +167,7 @@ async def test_a_relay_replaying_states_at_startup_is_not_a_person(hass, world):
         await hass.async_block_till_done()
 
         attrs = heater(hass).attributes
+        assert commands["n"] < COMMAND_CAP, "override and control loop chased each other"
         assert attrs["smart_eco_pause_reason"] is None
         assert heater(hass).state == "electric"
         # ...and the control loop put the switch back where it should be.
@@ -162,3 +194,125 @@ async def test_a_reload_while_running_gets_no_grace(hass, world):  # noqa: F811
     await start_heating_tank(hass, running=True)
     assert heater(hass).state == STATE_OFF
     assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+
+async def test_a_stale_switch_event_is_not_a_person(hass, world):  # noqa: F811
+    """Outside any grace: an event a later state has overtaken is not intent.
+
+    Two writes land before the listener runs, so it sees on->off while the
+    switch already reads on again. Judging that against the command baseline
+    is how the integration's own turn_off echo was read as a manual OFF.
+    """
+    with freeze_time(START) as frozen:
+        await start_heating_tank(hass)
+        await finish_starting(hass)
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        frozen.tick(STARTUP_GRACE + timedelta(seconds=1))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+        commands = cap_switch_commands(hass, world)
+        hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
+        hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+        await hass.async_block_till_done()
+
+        assert commands["n"] < COMMAND_CAP, "override and control loop chased each other"
+        assert heater(hass).attributes["smart_eco_pause_reason"] is None
+        assert heater(hass).state == "electric"
+
+
+def delayed_switch(hass, world, latency, lose=()):  # noqa: F811
+    """A switch that reports commands back after ``latency`` seconds.
+
+    States in ``lose`` are sent and never reported, like a dropped cloud call.
+    """
+    from homeassistant.core import callback
+    from homeassistant.helpers.event import async_call_later
+
+    sent = []
+
+    def _make(state):
+        async def _handler(call):
+            sent.append(state)
+            if state in lose:
+                return
+            entity_id = call.data["entity_id"]
+            entity_id = entity_id if isinstance(entity_id, str) else entity_id[0]
+
+            @callback
+            def _land(_now):
+                hass.states.async_set(entity_id, state)
+
+            async_call_later(hass, latency, _land)
+        return _handler
+
+    hass.services.async_register("homeassistant", "turn_on", _make(STATE_ON))
+    hass.services.async_register("homeassistant", "turn_off", _make(STATE_OFF))
+    return sent
+
+
+async def heating_after_grace(hass, frozen):
+    await start_heating_tank(hass)
+    await finish_starting(hass)
+    hass.states.async_set(PV_EXCESS, STATE_ON)
+    await hass.async_block_till_done()
+    frozen.tick(STARTUP_GRACE + timedelta(seconds=5))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+
+async def set_mode(hass, mode):
+    await hass.services.async_call(
+        "water_heater",
+        "set_operation_mode",
+        {"entity_id": UPSTAIRS, "operation_mode": mode},
+        blocking=True,
+    )
+
+
+@pytest.mark.parametrize("latency", [0.1, 10])
+async def test_our_own_late_echo_is_not_a_person(hass, world, latency):  # noqa: F811
+    """Off, then straight back to electric, inside the switch's report delay.
+
+    The OFF we sent lands after the baseline is ON again. Read as a person, it
+    put the tank OFF with a manual pause -- against the last thing asked for.
+    """
+    with freeze_time(START) as frozen:
+        await heating_after_grace(hass, frozen)
+        sent = delayed_switch(hass, world, latency)
+        await set_mode(hass, STATE_OFF)
+        await set_mode(hass, "electric")
+        await hass.async_block_till_done()
+        for _ in range(3):
+            frozen.tick(timedelta(seconds=latency))
+            async_fire_time_changed(hass)
+            await hass.async_block_till_done()
+
+        assert heater(hass).state == "electric"
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+        assert sent == [STATE_OFF, STATE_ON]
+
+
+async def test_a_command_that_never_reported_cannot_swallow_a_later_flip(hass, world):  # noqa: F811
+    """The in-flight record expires; otherwise OFF could become unreachable.
+
+    An OFF we sent is lost, intent returns to ON, and a minute later a person
+    turns the switch off at the wall. Matched against the stale OFF it would
+    read as our echo and the control loop would turn the element back on.
+    """
+    with freeze_time(START) as frozen:
+        await heating_after_grace(hass, frozen)
+        delayed_switch(hass, world, 0.1, lose=(STATE_OFF,))
+        await set_mode(hass, STATE_OFF)
+        await set_mode(hass, "electric")
+        await hass.async_block_till_done()
+
+        frozen.tick(timedelta(seconds=60))
+        async_fire_time_changed(hass)
+        hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
+        await hass.async_block_till_done()
+
+        assert heater(hass).state == STATE_OFF
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF

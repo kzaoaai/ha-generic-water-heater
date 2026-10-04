@@ -10,13 +10,15 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorExtraStoredData,
+    SensorStateClass,
 )
-from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTime
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
@@ -222,6 +224,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
         )
+        for detail in (DaysUntilDisinfectionSensor, DisinfectionHoldProgressSensor):
+            entities.append(
+                detail(
+                    name=name,
+                    entry_id=entry.entry_id,
+                    runtime=hass.data[DOMAIN][entry.entry_id],
+                    device_identifiers=device_identifiers,
+                    device_has_name=device_has_name,
+                )
+            )
 
     if entities:
         async_add_entities(entities)
@@ -564,17 +576,12 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
     @property
     def extra_state_attributes(self):
         """Return the numbers behind the state, so it can be argued with."""
-        now = dt_util.utcnow()
         window_hours, growth_hours, lethality, peak = self._window_metrics()
 
-        days_since: float | None = None
-        if self._last_disinfection_at is not None:
-            days_since = round(
-                (now - self._last_disinfection_at).total_seconds() / 86400, 2
-            )
-
+        # Days until the next cycle is due and the live hold progress used to be
+        # attributes here; since 3.0.0 they are entities of their own, so they
+        # have history and can drive automations without a template.
         return {
-            "days_since_disinfection": days_since,
             "last_disinfection_at": (
                 self._last_disinfection_at.isoformat()
                 if self._last_disinfection_at
@@ -584,7 +591,6 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             "disinfection_temperature_c": DISINFECTION_TEMP_C,
             "disinfection_sustain_c": DISINFECTION_SUSTAIN_C,
             "disinfection_hold_minutes": int(DISINFECTION_HOLD.total_seconds() // 60),
-            "hold_progress_minutes": round(self._hold_seconds / 60, 1),
             "hold_in_progress": self._hold_open,
             "hours_in_growth_band_7d": round(growth_hours, 1),
             "fraction_in_growth_band_7d": (
@@ -650,6 +656,8 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._runtime["legionella_hold_progress_minutes"] = round(
                 self._hold_seconds / 60, 1
             )
+            self._runtime["legionella_last_disinfection_at"] = self._last_disinfection_at
+            self._runtime["legionella_interval_days"] = self._interval.days
 
         if getattr(self, "hass", None) is None:
             return
@@ -905,3 +913,108 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._attr_native_value = STATE_ELEVATED
         else:
             self._attr_native_value = STATE_HIGH
+
+
+class _LegionellaDetailSensor(SensorEntity):
+    """A number the Legionella Risk sensor computes, exposed as its own entity.
+
+    Reads what the risk sensor publishes to the entry's runtime dict and wakes
+    on its dispatcher signal, the same wiring the water heater already uses to
+    read the verdict. Nothing is computed twice.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _label: str
+    _key: str
+
+    def __init__(
+        self,
+        name: str | None,
+        entry_id: str,
+        runtime: dict,
+        device_identifiers,
+        device_has_name: bool = False,
+    ) -> None:
+        self._entry_id = entry_id
+        self._runtime = runtime
+        self._device_identifiers = device_identifiers
+        self._attr_name = self._label
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{self._key}"
+        if name and not device_has_name:
+            self._attr_name = f"{name} {self._label}"
+            self._attr_has_entity_name = False
+
+    @property
+    def device_info(self):
+        """Return device information for the device registry."""
+        if self._device_identifiers:
+            return {"identifiers": self._device_identifiers}
+        return {"identifiers": {(DOMAIN, self._entry_id)}}
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the risk sensor's updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                legionella_risk_signal(self._entry_id),
+                self._async_risk_updated,
+            )
+        )
+
+    @callback
+    def _async_risk_updated(self, _risk) -> None:
+        self.async_write_ha_state()
+
+
+class DaysUntilDisinfectionSensor(_LegionellaDetailSensor):
+    """Days until the disinfection interval lapses; negative once overdue.
+
+    Unknown until a cycle has been seen: with no last cycle there is no date
+    to count towards, and inventing one would read as a schedule.
+    """
+
+    _label = "Days Until Disinfection"
+    _key = "legionella_days_until_disinfection"
+    _attr_native_unit_of_measurement = UnitOfTime.DAYS
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:calendar-clock"
+
+    async def async_added_to_hass(self) -> None:
+        """Also tick on a clock: a flat tank may not report for twenty minutes."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass, self._async_tick, timedelta(minutes=10)
+            )
+        )
+
+    @callback
+    def _async_tick(self, _now) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        last = self._runtime.get("legionella_last_disinfection_at")
+        interval = self._runtime.get("legionella_interval_days")
+        if last is None or interval is None:
+            return None
+        due = last + timedelta(days=interval)
+        return round((due - dt_util.utcnow()).total_seconds() / 86400, 2)
+
+
+class DisinfectionHoldProgressSensor(_LegionellaDetailSensor):
+    """Minutes banked toward the current hold at the disinfection temperature."""
+
+    _label = "Disinfection Hold Progress"
+    _key = "legionella_hold_progress"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:timer-sand"
+
+    @property
+    def native_value(self) -> float | None:
+        return self._runtime.get("legionella_hold_progress_minutes")

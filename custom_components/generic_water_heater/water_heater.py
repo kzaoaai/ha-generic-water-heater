@@ -1,6 +1,6 @@
 """Support for generic water heater units."""
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.water_heater import (
@@ -95,6 +95,11 @@ _LOGGER = logging.getLogger(__name__)
 # A condition that cannot be evaluated is not a condition that is false. The
 # window is bounded so a template whose source never returns cannot bypass eco.
 STARTUP_GRACE = timedelta(minutes=2)
+
+# How long a switch command of ours may take to be reported back. A cloud relay
+# reported an OFF 11 s after it was sent on 2026-10-02; this leaves headroom
+# without letting a stale entry swallow a person's flip much later.
+OWN_ECHO_WINDOW = timedelta(seconds=30)
 
 DEFAULT_NAME = "Generic Water Heater"
 
@@ -269,6 +274,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._attr_should_poll = False
         self._device_identifiers = device_identifiers
         self._last_commanded_switch_state = None
+        # Commands sent but not yet reported back: (state, sent_at).
+        self._commands_in_flight: list[tuple[str, datetime]] = []
         self._last_switch_change_time = None
         self._cooldown_timer = None
         self._pending_switch_state = None
@@ -551,8 +558,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         risk = self._runtime.get("legionella_risk")
 
         if self._disinfecting:
-            if risk == "Low":
-                self._end_disinfection("risk cleared", completed=True)
+            if self._cycle_completed_since_start():
+                self._end_disinfection("cycle completed", completed=True)
                 await self._async_control_heating()
                 return
             # Upgrading a cycle that is already waiting on the eco window is
@@ -573,7 +580,17 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         if self._legionella_mode == LEGIONELLA_MODE_OFF:
             return
-        if risk not in ("Elevated", "High"):
+        # A one-shot is a command: it runs now even on a tank whose risk is
+        # still Low. Waiting for the interval instead left it armed and silent
+        # for days, then fired at a moment nobody picked. Not limited to the
+        # moment of choosing -- an armed one-shot seen later (after a restart,
+        # say) is the same pending command, and it clears itself to Off once
+        # its cycle completes, so it cannot run twice. A standing policy
+        # (Always ON) still waits for the risk to rise.
+        if (
+            risk not in ("Elevated", "High")
+            and self._legionella_mode not in LEGIONELLA_ONE_SHOT_MODES
+        ):
             return
 
         # A tank a person has switched off stays off -- unless they have just
@@ -630,6 +647,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("disinfection: started, will return to %s", prior)
         await self._async_control_heating()
         self.async_write_ha_state()
+
+    def _cycle_completed_since_start(self) -> bool:
+        """Whether a full hold has completed since this cycle began.
+
+        Not "risk is Low": a one-shot can start on a Low tank, and reading the
+        verdict would end that cycle the moment it began. A hold completing
+        after the start is what the cycle was for, whatever the risk said.
+        """
+        last = self._runtime.get("legionella_last_disinfection_at")
+        started = (
+            dt_util.parse_datetime(self._disinfection_started_at)
+            if self._disinfection_started_at
+            else None
+        )
+        return last is not None and started is not None and last >= started
 
     @callback
     def _end_disinfection(
@@ -1216,6 +1248,31 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     new_state.state,
                 )
                 self.hass.async_create_task(self._async_control_heating())
+            elif (
+                state_changed
+                and (current := self.hass.states.get(self.heater_entity_id)) is not None
+                and current.state != new_state.state
+            ):
+                # Stale: a later state has already landed, so this event no
+                # longer describes the switch. Judging it against a command
+                # baseline that has moved on is how our own turn_off echo, or
+                # a reconnect replay, gets read as a person -- and, with a fast
+                # enough switch, how override and control chase each other.
+                self._debug_log(
+                    "switch event %s is stale (switch now %s); not treating as manual intent",
+                    new_state.state,
+                    current.state,
+                )
+            elif state_changed and self._consume_own_echo(new_state.state):
+                # Our own command reporting back. It is not a person even when
+                # the intent has moved on while it was in flight: turn off then
+                # straight back to electric, and the OFF lands after the
+                # baseline is ON again. Read against the baseline, that echo
+                # was a "manual OFF" -- the tank went off with a 3-hour pause,
+                # against the person's last choice. Re-assert the intent.
+                self._debug_log("switch reported %s: our own command", new_state.state)
+                if new_state.state != self._last_commanded_switch_state:
+                    self.hass.async_create_task(self._async_control_heating())
             elif returned_from_unavailable:
                 self._debug_log(
                     "switch reappeared as %s after %s; not treating as manual intent",
@@ -1257,6 +1314,18 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log_hvac_action("switch state update")
         self._update_smart_eco_state()
         self.async_write_ha_state()
+
+    def _consume_own_echo(self, state: str) -> bool:
+        """Match a reported state to the oldest command of ours awaiting it."""
+        cutoff = dt_util.utcnow() - OWN_ECHO_WINDOW
+        self._commands_in_flight = [
+            (s, at) for s, at in self._commands_in_flight if at >= cutoff
+        ]
+        for index, (sent, _at) in enumerate(self._commands_in_flight):
+            if sent == state:
+                del self._commands_in_flight[index]
+                return True
+        return False
 
     async def _async_handle_manual_switch_override(self, new_switch_state: str) -> None:
         """Translate manual switch actions into operation mode intent."""
@@ -1995,6 +2064,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("service call: turn_on entity_id=%s", self.heater_entity_id)
         self._last_switch_change_time = now
         data = {ATTR_ENTITY_ID: self.heater_entity_id}
+        self._commands_in_flight.append((STATE_ON, now))
         await self.hass.services.async_call(
             HA_DOMAIN, SERVICE_TURN_ON, data, context=self._context
         )
@@ -2044,6 +2114,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("service call: turn_off entity_id=%s", self.heater_entity_id)
         self._last_switch_change_time = now
         data = {ATTR_ENTITY_ID: self.heater_entity_id}
+        self._commands_in_flight.append((STATE_OFF, now))
         await self.hass.services.async_call(
             HA_DOMAIN, SERVICE_TURN_OFF, data, context=self._context
         )

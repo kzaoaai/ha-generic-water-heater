@@ -50,7 +50,14 @@ async def setup_with_policy(hass):
 
 async def report_risk(hass, entry, risk):
     """Publish a risk verdict the way the sensor platform does."""
-    hass.data[DOMAIN][entry.entry_id]["legionella_risk"] = risk
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime["legionella_risk"] = risk
+    if risk == "Low":
+        # The real sensor only turns Low by banking a completed hold, and a
+        # cycle ends on that completion, not on the verdict.
+        import homeassistant.util.dt as dt_util
+
+        runtime["legionella_last_disinfection_at"] = dt_util.utcnow()
     async_dispatcher_send(hass, legionella_risk_signal(entry.entry_id), risk)
     await hass.async_block_till_done()
 
@@ -606,3 +613,65 @@ async def test_a_standing_policy_still_leaves_an_off_tank_alone(hass, world):  #
         "a standing policy resurrected a tank a person had switched off"
     )
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# A one-shot is a command, even on a tank whose risk is still Low
+# ---------------------------------------------------------------------------
+
+
+async def report_low_without_a_new_cycle(hass, entry, completed_at):
+    """Low because of a cycle that finished BEFORE the request, days ago."""
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime["legionella_risk"] = "Low"
+    runtime["legionella_last_disinfection_at"] = completed_at
+    async_dispatcher_send(hass, legionella_risk_signal(entry.entry_id), "Low")
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize("option", ["Disinfect", "Disinfect ASAP"])
+async def test_a_one_shot_on_a_low_tank_starts_now(hass, world, option):  # noqa: F811
+    """It used to sit armed and silent until the interval lapsed, days later."""
+    import homeassistant.util.dt as dt_util
+
+    upstairs, _ = await setup_with_policy(hass)
+    await report_low_without_a_new_cycle(
+        hass, upstairs, dt_util.utcnow() - timedelta(days=6)
+    )
+    await choose(hass, option)
+
+    state = hass.states.get(UPSTAIRS)
+    assert state.attributes["disinfection_active"] is True
+    assert state.state == STATE_PERFORMANCE
+
+
+async def test_a_low_verdict_alone_does_not_end_a_cycle_started_on_a_low_tank(hass, world):  # noqa: F811
+    """The risk is Low before, during and after; only a new hold finishes it."""
+    import homeassistant.util.dt as dt_util
+
+    upstairs, _ = await setup_with_policy(hass)
+    old = dt_util.utcnow() - timedelta(days=6)
+    await report_low_without_a_new_cycle(hass, upstairs, old)
+    await choose(hass, "Disinfect")
+
+    await report_low_without_a_new_cycle(hass, upstairs, old)
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
+
+    await report_risk(hass, upstairs, "Low")  # banks a hold completed just now
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+    assert hass.states.get(UPSTAIRS).state == STATE_ELECTRIC
+    assert hass.states.get(SELECT).state == "Off"
+
+
+async def test_always_on_still_waits_for_the_risk_to_rise(hass, world):  # noqa: F811
+    """A standing policy is not a command; on a Low tank it has nothing to do."""
+    import homeassistant.util.dt as dt_util
+
+    upstairs, _ = await setup_with_policy(hass)
+    await report_low_without_a_new_cycle(
+        hass, upstairs, dt_util.utcnow() - timedelta(days=6)
+    )
+    await choose(hass, "Always ON")
+
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+    assert hass.states.get(UPSTAIRS).state == STATE_ELECTRIC

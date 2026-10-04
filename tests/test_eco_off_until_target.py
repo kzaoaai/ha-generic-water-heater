@@ -189,7 +189,14 @@ async def report_risk(hass, entry, risk):
 
     from custom_components.generic_water_heater import DOMAIN, legionella_risk_signal
 
-    hass.data[DOMAIN][entry.entry_id]["legionella_risk"] = risk
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime["legionella_risk"] = risk
+    if risk == "Low":
+        # The real sensor only turns Low by banking a completed hold, and a
+        # cycle ends on that completion, not on the verdict.
+        import homeassistant.util.dt as dt_util
+
+        runtime["legionella_last_disinfection_at"] = dt_util.utcnow()
     async_dispatcher_send(hass, legionella_risk_signal(entry.entry_id), risk)
     await hass.async_block_till_done()
 

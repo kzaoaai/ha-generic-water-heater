@@ -225,8 +225,9 @@ async def test_a_disinfection_hold_survives_the_real_trace(hass, world):  # noqa
             await hass.async_block_till_done()
             frozen.tick(timedelta(seconds=30))
 
-        before = hass.states.get("sensor.upstairs_legionella_risk").attributes
-        assert before["hold_progress_minutes"] >= 13.0
+        progress = "sensor.upstairs_disinfection_hold_progress"
+        before = float(hass.states.get(progress).state)
+        assert before >= 13.0
 
         hass.states.async_set(UPSTAIRS_SENSOR, "32.9")
         await hass.async_block_till_done()
@@ -236,7 +237,7 @@ async def test_a_disinfection_hold_survives_the_real_trace(hass, world):  # noqa
 
         after = hass.states.get("sensor.upstairs_legionella_risk").attributes
         assert after["hold_in_progress"] is True
-        assert after["hold_progress_minutes"] >= before["hold_progress_minutes"]
+        assert float(hass.states.get(progress).state) >= before
         assert after["max_temperature_7d"] == 62.0
 
 

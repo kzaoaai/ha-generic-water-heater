@@ -361,11 +361,18 @@ tell you what is actually in your water. It is structurally blind to:
 
 State is `Low`, `Elevated`, `High`, or `Unknown`, driven by how long it has been since a qualifying
 cycle relative to `legionella_interval_days` (`Elevated` past one interval, `High` past two). The
-numbers behind it are attributes: `days_since_disinfection`, `hold_progress_minutes`,
-`hours_in_growth_band_7d`, `equivalent_log10_reduction_7d` and `max_temperature_7d`.
+numbers behind it are attributes, including `last_disinfection_at`, `hours_in_growth_band_7d`,
+`equivalent_log10_reduction_7d` and `max_temperature_7d`.
 
-`hold_progress_minutes` is live, so a manual high-temperature session can be watched as it
-accumulates.
+Two more figures are entities of their own, so they keep history and can drive automations
+directly:
+
+- **Days Until Disinfection**: days left before the interval lapses, negative once it is overdue.
+  `unknown` until a cycle has been seen.
+- **Disinfection Hold Progress**: minutes banked toward the current hour at 60 °C. It is live, so
+  a manual high-temperature session can be watched as it accumulates.
+
+Before 3.0.0 these were the attributes `days_since_disinfection` and `hold_progress_minutes`.
 
 ### The model
 
@@ -410,12 +417,13 @@ With the risk sensor enabled, each tank also gets a **Legionella Disinfection** 
 | Option | Behaviour |
 | --- | --- |
 | `Off` | Inert. The default, and what a cycle returns to when it completes. |
-| `Disinfect` | Runs **one** cycle, then clears itself back to `Off`. Nothing ever starts again without you asking. |
+| `Disinfect` | Runs **one** cycle now, even if the risk is still `Low`, then clears itself back to `Off`. The cycle ends when a full hour at 60 °C completes after it started. Nothing ever starts again without you asking. |
 | `Disinfect ASAP` | The same one-shot, but it does not wait for the eco condition: starting a cycle also sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. Switching to it while a plain `Disinfect` cycle is already waiting upgrades that cycle in place. |
 | `Always ON` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
 
-Choosing a policy while the risk reads `Elevated` or `High` puts the tank into `performance` and
-leaves it there until the sensor reports `Low`, then hands it back to the mode it had. The cycle is
+A cycle puts the tank into `performance` and leaves it there until a full hour at 60 °C completes
+after the cycle started, then hands it back to the mode it had. A one-shot starts as soon as you
+choose it; `Always ON` starts when the risk reads `Elevated` or `High`. The cycle is
 **goal-seeking, not timed** — it is a standing request for temperature, not a fixed run.
 
 It deliberately **does not outrank anything**:
