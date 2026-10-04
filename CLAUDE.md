@@ -101,6 +101,39 @@ first pass deleted them and an adversarial review caught it:
    the member object is lost. It is stashed outside the member. An options save is precisely when two
    elements could otherwise come on together.
 
+### Every consumer of the tank sensor goes through the spike filter
+
+`temperature_tracking.async_track_filtered_temperature` is the only way to subscribe to the
+temperature sensor. A single reading >10 °C from the last accepted one is held until the next
+reading decides it (or 60 s pass). Combined relay/temperature devices emit one wild reading as the
+relay switches; before the filter, one such reading discarded a near-complete disinfection hold.
+`unavailable`/`unknown` are never delayed — the failsafe acts on them. A new consumer that
+subscribes with `async_track_state_change_event` directly reintroduces the bug.
+
+### A Home Assistant start is not the eco condition going false
+
+For `STARTUP_GRACE` (2 min) after `homeassistant_started` — not after entity load — a FALSE eco
+condition neither parks nor restores; the restored mode stands. A TRUE one is trusted at once.
+Switch flips in that window are not manual intent. Only a real start gets the window: a
+config-entry reload has its sources loaded. Without this, every restart switched heating tanks off
+because the template's source entities did not exist yet.
+
+### The integration's own switch traffic is never a person
+
+Manual-override detection in `_async_switch_changed` skips, in order: the startup window; stale
+events (a later state already landed); our own commands reporting back (`_commands_in_flight`,
+consumed within `OWN_ECHO_WINDOW`, 30 s — then control re-asserts intent); a switch returning from
+unavailable. The echo record **must expire**: without it, a lost OFF followed by a wall OFF later
+reads as our echo and the element comes back on, making OFF unreachable. Two genuine flips 50 ms
+apart still count as a person — nothing distinguishes a fast replay from a hand.
+
+### A disinfection cycle ends on a completed hold, not on the risk verdict
+
+One-shots (`Disinfect`, `Disinfect ASAP`) start immediately even when risk is Low; `Always ON` waits
+for Elevated. So completion is "a hold completed after `disinfection_started_at`"
+(`_cycle_completed_since_start`); reading "risk is Low" would end a cycle started on a Low tank the
+moment it began.
+
 ### A config-entry reload does not re-import module code
 
 Only a restart loads changed Python. Stale traceback line numbers are the tell. When a change is
@@ -151,6 +184,12 @@ If you find one of these notes, do not "fix" it by adding a test that does not t
 They are the main record of *why*, including approaches that looked right and were not. A future
 reader's first question is usually "was this considered?" — answer it there. No AI attribution.
 
+### Releasing
+
+HACS installs **releases**, not commits on `main`. A change reaches an install only via a tag plus
+`gh release create vX.Y.Z`, then a HACS update, then a Home Assistant **restart**. Bump
+`manifest.json` `version` to match the tag.
+
 ### Versioning
 
 Removing or renaming a documented option or entity attribute is breaking: bump major. Existing
@@ -167,10 +206,22 @@ options form.
 | `water_heater.py` | the entity, the control loop, Smart Eco, disinfection, load-shed services |
 | `fleet.py` | switch-on staggering; pure logic, imports nothing from Home Assistant |
 | `config_flow.py` | sectioned config/options forms, flat storage |
-| `sensor.py` | Smart Eco state, legionella risk, max-temp history |
+| `sensor.py` | Smart Eco state, legionella risk, max-temp history, Days Until Disinfection, Disinfection Hold Progress |
+| `temperature_filter.py` | single-sample spike rejection; pure logic, no Home Assistant imports |
+| `temperature_tracking.py` | the HA subscription wrapper every temperature consumer uses |
 | `select.py` | Smart Eco Mode and Legionella Disinfection selects |
 | `binary_sensor.py` | Hot Water In Use draw detector |
 
 `fleet.py` is deliberately Home-Assistant-free and driven by an injected `now`, so its decisions can
 be unit tested without an event loop. Keep new decision logic there and the plumbing in
 `water_heater.py`.
+
+---
+
+## Open items
+
+- `water_heater.py` (around line 144) calls `device_registry.async_update_device(...,
+  remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to
+  `async_remove_device` / `new_config_entry_id`.
+- `manifest.json` `issue_tracker` points at `ha_generic_water_heater` (underscores); the repo is
+  `ha-generic-water-heater`, so the link is broken. Same for `documentation`, which points at core.
