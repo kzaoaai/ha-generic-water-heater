@@ -77,6 +77,7 @@ from . import (
     legionella_risk_signal,
     DISINFECTION_GIVE_UP_DAYS,
     LEGIONELLA_MODE_ASAP,
+    LEGIONELLA_BYPASS_ECO_MODES,
     LEGIONELLA_MODE_OFF,
     LEGIONELLA_MODE_ON,
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
@@ -302,6 +303,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._disinfecting = False
         self._disinfection_prior_mode: str | None = None
         self._disinfection_started_at: str | None = None
+        # After a standing policy gives up: no new cycle before this time.
+        self._disinfection_retry_after: str | None = None
         # What OFF_UNTIL_TARGET reverts to, and when it started -- the second
         # is what bounds it, so a tank that never reaches target cannot leave
         # eco disabled for ever.
@@ -350,6 +353,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "legionella_mode": self._legionella_mode,
             "disinfection_active": self._disinfecting,
             "disinfection_started_at": self._disinfection_started_at,
+            "disinfection_retry_after": self._disinfection_retry_after,
             "disinfection_return_mode": self._disinfection_prior_mode,
             "smart_eco_previous_mode": self._smart_eco_previous_mode,
             "smart_eco_off_until_target_since": (
@@ -536,6 +540,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         self._legionella_mode = mode
         self._runtime["legionella_mode"] = mode
+        # A person choosing a policy is fresh intent; a give-up backoff left by
+        # the previous one does not carry over.
+        self._disinfection_retry_after = None
         self._debug_log("disinfection policy: %s (source=%s)", mode, source)
 
         if mode == LEGIONELLA_MODE_OFF and self._disinfecting:
@@ -568,7 +575,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # and a cycle in flight never goes back through it.
             if (
                 user_request
-                and self._legionella_mode == LEGIONELLA_MODE_ASAP
+                and self._legionella_mode in LEGIONELLA_BYPASS_ECO_MODES
                 and self._smart_eco_mode != SMART_ECO_MODE_OFF_UNTIL_TARGET
             ):
                 self._off_until_target_for_disinfection = True
@@ -586,11 +593,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # moment of choosing -- an armed one-shot seen later (after a restart,
         # say) is the same pending command, and it clears itself to Off once
         # its cycle completes, so it cannot run twice. A standing policy
-        # (Always ON) still waits for the risk to rise.
+        # (As needed) still waits for the risk to rise.
         if (
             risk not in ("Elevated", "High")
             and self._legionella_mode not in LEGIONELLA_ONE_SHOT_MODES
         ):
+            return
+        if self._legionella_mode not in LEGIONELLA_ONE_SHOT_MODES and self._in_give_up_backoff():
+            # A standing policy that just gave up would otherwise restart at
+            # once -- the risk is still Elevated -- and spend another three
+            # days failing in the same way.
             return
 
         # A tank a person has switched off stays off -- unless they have just
@@ -631,9 +643,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # mode at OFF and restores this value when the condition returns.
         self._smart_eco_last_heating_mode = STATE_PERFORMANCE
         self._runtime["smart_eco_last_heating_mode"] = STATE_PERFORMANCE
-        if self._legionella_mode == LEGIONELLA_MODE_ASAP:
-            # "ASAP" means do not wait for the eco condition. Expressed as the
-            # transient eco mode rather than as a second bypass of its own, so
+        if self._legionella_mode in LEGIONELLA_BYPASS_ECO_MODES:
+            # "Once" / "As needed" (no "(eco)") mean do not wait for the eco
+            # condition. Expressed as the transient eco mode rather than as a
+            # second bypass of its own, so
             # there is one mechanism that stands eco down and one that gives it
             # back -- and the give-back is already bounded.
             self._off_until_target_for_disinfection = True
@@ -647,6 +660,16 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("disinfection: started, will return to %s", prior)
         await self._async_control_heating()
         self.async_write_ha_state()
+
+    def _in_give_up_backoff(self) -> bool:
+        """Whether a standing policy is still waiting out a give-up."""
+        if self._disinfection_retry_after is None:
+            return False
+        retry = dt_util.parse_datetime(self._disinfection_retry_after)
+        if retry is None or dt_util.utcnow() >= retry:
+            self._disinfection_retry_after = None
+            return False
+        return True
 
     def _cycle_completed_since_start(self) -> bool:
         """Whether a full hold has completed since this cycle began.
@@ -763,8 +786,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
         elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
             blocked_by = (
-                "Smart Eco is gating it -- pause Smart Eco and run it again if "
-                "you want to push it through."
+                "Smart Eco is gating it -- choose Once to push a cycle through "
+                "without waiting for the eco condition."
             )
         else:
             blocked_by = (
@@ -772,15 +795,28 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 "cannot reach 60 °C at this tank's sensor."
             )
         self._end_disinfection("no disinfection reached in time")
-        self._legionella_mode = LEGIONELLA_MODE_OFF
-        self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
-        self._notify_legionella_select()
+        if self._legionella_mode in LEGIONELLA_ONE_SHOT_MODES:
+            # A one-shot was a single request; it is over either way.
+            self._legionella_mode = LEGIONELLA_MODE_OFF
+            self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
+            self._notify_legionella_select()
+            outcome = "it has been stopped and the policy set to Off"
+        else:
+            # A standing policy stays armed -- setting it Off would silently
+            # disarm it -- but waits one full interval before trying again.
+            interval = int(self._runtime.get("legionella_interval_days") or 7)
+            retry = dt_util.utcnow() + timedelta(days=interval)
+            self._disinfection_retry_after = retry.isoformat()
+            outcome = (
+                "it has been stopped; the policy stays on and will try again "
+                f"after {dt_util.as_local(retry).strftime('%Y-%m-%d %H:%M')}"
+            )
         persistent_notification.async_create(
             self.hass,
             (
                 f"{self.name} ran a disinfection cycle for "
                 f"{DISINFECTION_GIVE_UP_DAYS} days without reaching 60 °C for a "
-                "full hour, so it has been stopped and the policy set to Off. "
+                f"full hour, so {outcome}. "
                 f"Hold progress reached {progress} minutes. {blocked_by}"
             ),
             title="Water heater disinfection gave up",
@@ -958,6 +994,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     if isinstance(restored_since, str)
                     else dt_util.utcnow().isoformat()
                 )
+
+            restored_retry = old_state.attributes.get("disinfection_retry_after")
+            if isinstance(restored_retry, str):
+                self._disinfection_retry_after = restored_retry
 
             restored_legionella_mode = old_state.attributes.get("legionella_mode")
             if restored_legionella_mode in LEGIONELLA_MODES:

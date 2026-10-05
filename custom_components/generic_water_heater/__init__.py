@@ -68,23 +68,34 @@ SMART_ECO_MODES = (
     SMART_ECO_MODE_OFF_UNTIL_TARGET,
 )
 
-# Disinfection policy. OFF is inert. UNTIL_DISINFECTED is a one-shot: it runs a
-# single cycle and then clears itself, so nothing ever starts again without a
-# person asking. ON is a standing policy and will re-run every time the risk
-# sensor reports the interval has lapsed.
+# Disinfection policy, on two axes: WHEN (once now, or as needed each time the
+# interval lapses) and WHETHER it waits for the Smart Eco condition.
+#
+# OFF is inert. The one-shots run a single cycle and then clear themselves, so
+# nothing starts again without a person asking. The standing policies re-run
+# every time the risk sensor reports the interval has lapsed.
+#
+# These internal values are stored state (restored attributes, diagnostics), so
+# they keep their historical spellings; only the select labels describe them.
 LEGIONELLA_MODE_OFF = "off"
-LEGIONELLA_MODE_UNTIL_DISINFECTED = "until_disinfected"
-LEGIONELLA_MODE_ON = "on"
-# Same one-shot as UNTIL_DISINFECTED, but it also puts Smart Eco into
-# OFF_UNTIL_TARGET so the cycle runs on grid rather than waiting for sun.
-LEGIONELLA_MODE_ASAP = "until_disinfected_asap"
+LEGIONELLA_MODE_UNTIL_DISINFECTED = "until_disinfected"  # Once (eco)
+LEGIONELLA_MODE_ASAP = "until_disinfected_asap"  # Once
+LEGIONELLA_MODE_ON = "on"  # As needed (eco)
+LEGIONELLA_MODE_ON_ASAP = "on_asap"  # As needed
 LEGIONELLA_MODES = (
     LEGIONELLA_MODE_OFF,
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
     LEGIONELLA_MODE_ASAP,
     LEGIONELLA_MODE_ON,
+    LEGIONELLA_MODE_ON_ASAP,
 )
-# The two that mean "do this now", as opposed to the standing ON policy.
+# The ones that do not wait for eco: starting a cycle also puts Smart Eco into
+# OFF_UNTIL_TARGET, which stands it down and gives it back when the cycle ends.
+LEGIONELLA_BYPASS_ECO_MODES = (
+    LEGIONELLA_MODE_ASAP,
+    LEGIONELLA_MODE_ON_ASAP,
+)
+# The two that mean "do this now", as opposed to the standing policies.
 LEGIONELLA_ONE_SHOT_MODES = (
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
     LEGIONELLA_MODE_ASAP,

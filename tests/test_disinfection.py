@@ -91,7 +91,7 @@ async def test_the_policy_select_appears_when_the_sensor_is_enabled(hass, world)
     assert state is not None
     assert state.state == "Off"
     assert state.attributes["options"] == [
-        "Off", "Disinfect", "Disinfect ASAP", "Always ON",
+        "Off", "Once", "Once (eco)", "As needed", "As needed (eco)",
     ]
 
 
@@ -113,7 +113,7 @@ async def test_a_requested_cycle_promotes_to_performance(hass, world):  # noqa: 
     """The whole point: ask for it, and the tank chases 60 C."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     state = hass.states.get(UPSTAIRS)
     assert state.state == STATE_PERFORMANCE
@@ -130,7 +130,7 @@ async def test_the_cycle_survives_the_nightly_eco_gap(hass, world):  # noqa: F81
     """
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     assert (
         hass.states.get(UPSTAIRS).attributes["smart_eco_last_heating_mode"]
@@ -152,7 +152,7 @@ async def test_reaching_low_hands_the_tank_back(hass, world):  # noqa: F811
     """Finishing returns the tank to normal operation, not to performance."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     await report_risk(hass, upstairs, "Low")
 
@@ -166,7 +166,7 @@ async def test_until_disinfected_clears_itself(hass, world):  # noqa: F811
     """A one-shot must not re-arm; nothing starts again without a person."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     await report_risk(hass, upstairs, "Low")
 
     assert hass.states.get(SELECT).state == "Off"
@@ -183,10 +183,10 @@ async def test_on_is_a_standing_policy_and_runs_again(hass, world):  # noqa: F81
     """The other half of the dropdown: keep doing this."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
     await report_risk(hass, upstairs, "Low")
 
-    assert hass.states.get(SELECT).state == "Always ON"
+    assert hass.states.get(SELECT).state == "As needed (eco)"
     assert hass.states.get(UPSTAIRS).state == STATE_ELECTRIC
 
     await report_risk(hass, upstairs, "Elevated")
@@ -199,7 +199,7 @@ async def test_choosing_off_mid_cycle_stops_it(hass, world):  # noqa: F811
     """A person changing their mind wins immediately."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
 
     await choose(hass, "Off")
@@ -225,7 +225,7 @@ async def test_a_tank_switched_off_by_a_person_stays_off(hass, world):  # noqa: 
     await hass.async_block_till_done()
 
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
 
     assert hass.states.get(UPSTAIRS).state == STATE_OFF
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
@@ -235,7 +235,7 @@ async def test_smart_eco_still_blocks_a_disinfecting_tank(hass, world):  # noqa:
     """The cycle asks for heat; the eco gate still decides whether it gets it."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     hass.states.async_set(PV_EXCESS, STATE_OFF)
     await hass.async_block_till_done()
@@ -252,7 +252,7 @@ async def test_a_load_shed_still_drops_a_disinfecting_tank(hass, world):  # noqa
     """Supply protection outranks a maintenance cycle, with no special casing."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     await hass.services.async_call(
         DOMAIN, SERVICE_SHED, {"entity_id": UPSTAIRS}, blocking=True
@@ -276,7 +276,7 @@ async def test_the_return_mode_is_never_performance(hass, world):  # noqa: F811
     await hass.async_block_till_done()
 
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     assert hass.states.get(UPSTAIRS).attributes["disinfection_return_mode"] == (
         STATE_ELECTRIC
     )
@@ -291,12 +291,12 @@ async def test_a_cycle_that_gets_nowhere_gives_up_and_says_so(hass, world):  # n
     Left goal-seeking it would chase that forever, spending the surplus every
     afternoon and banking nothing. The bound is on the calendar, not on run
     length -- a run-length cap would abort the unpowered coast that actually
-    earns the credit.
+    earns the credit. A one-shot was a single request, so it ends at Off.
     """
     with freeze_time(TRIGGER):
         upstairs, _ = await setup_with_policy(hass)
         await report_risk(hass, upstairs, "Elevated")
-        await choose(hass, "Always ON")
+        await choose(hass, "Once (eco)")
         assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
 
     with freeze_time(TRIGGER + timedelta(days=4)):
@@ -308,9 +308,7 @@ async def test_a_cycle_that_gets_nowhere_gives_up_and_says_so(hass, world):  # n
     state = hass.states.get(UPSTAIRS)
     assert state.attributes["disinfection_active"] is False
     assert state.state == STATE_ELECTRIC
-    assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_OFF, (
-        "a hopeless cycle re-armed itself instead of stopping"
-    )
+    assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_OFF
     assert hass.states.get(SELECT).state == "Off"
 
     assert told.called, "the owner was never told the cycle gave up"
@@ -318,9 +316,61 @@ async def test_a_cycle_that_gets_nowhere_gives_up_and_says_so(hass, world):  # n
     # Nothing was blocking this tank -- eco was permitting throughout -- so the
     # message must not blame Smart Eco for it.
     assert "cannot reach 60" in message
-    assert "pause Smart Eco" not in message, (
+    assert "Smart Eco is gating" not in message, (
         "the notification blamed Smart Eco when Smart Eco was permitting"
     )
+
+
+async def test_a_standing_policy_that_gives_up_stays_armed_but_backs_off(hass, world):  # noqa: F811
+    """Setting it Off would silently disarm it; staying on would loop.
+
+    The risk is still Elevated after a give-up, so without a backoff a new
+    three-day cycle would start on the very next report.
+    """
+    with freeze_time(TRIGGER):
+        upstairs, _ = await setup_with_policy(hass)
+        await report_risk(hass, upstairs, "Elevated")
+        await choose(hass, "As needed (eco)")
+        assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
+
+    with freeze_time(TRIGGER + timedelta(days=4)):
+        with patch.object(water_heater_module.persistent_notification, "async_create") as told:
+            hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
+            await hass.async_block_till_done()
+        await report_risk(hass, upstairs, "Elevated")
+
+    state = hass.states.get(UPSTAIRS)
+    assert state.attributes["disinfection_active"] is False
+    assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_ON
+    assert hass.states.get(SELECT).state == "As needed (eco)"
+    assert state.attributes["disinfection_retry_after"] is not None
+    assert "stays on" in told.call_args.args[1]
+
+    # Still inside the backoff: the interval (7 days by default) has not passed.
+    with freeze_time(TRIGGER + timedelta(days=10)):
+        await report_risk(hass, upstairs, "Elevated")
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+
+    # One full interval after the give-up, it tries again.
+    with freeze_time(TRIGGER + timedelta(days=11, hours=1)):
+        await report_risk(hass, upstairs, "Elevated")
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
+
+
+async def test_choosing_a_policy_clears_a_give_up_backoff(hass, world):  # noqa: F811
+    """A person picking a policy is fresh intent, not a retry."""
+    with freeze_time(TRIGGER):
+        upstairs, _ = await setup_with_policy(hass)
+        await report_risk(hass, upstairs, "Elevated")
+        await choose(hass, "As needed (eco)")
+    with freeze_time(TRIGGER + timedelta(days=4)):
+        hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS).attributes["disinfection_retry_after"] is not None
+        await report_risk(hass, upstairs, "Elevated")
+        assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+        await choose(hass, "As needed")
+        assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
 
 
 async def test_the_give_up_notice_names_smart_eco_when_it_is_the_blocker(hass, world):  # noqa: F811
@@ -328,7 +378,7 @@ async def test_the_give_up_notice_names_smart_eco_when_it_is_the_blocker(hass, w
     with freeze_time(TRIGGER):
         upstairs, _ = await setup_with_policy(hass)
         await report_risk(hass, upstairs, "Elevated")
-        await choose(hass, "Always ON")
+        await choose(hass, "As needed (eco)")
         hass.states.async_set(PV_EXCESS, STATE_OFF)
         await hass.async_block_till_done()
 
@@ -338,7 +388,7 @@ async def test_the_give_up_notice_names_smart_eco_when_it_is_the_blocker(hass, w
             await hass.async_block_till_done()
 
     assert told.called
-    assert "pause Smart Eco" in told.call_args.args[1]
+    assert "Smart Eco is gating" in told.call_args.args[1]
 
 
 async def test_a_cycle_still_running_is_not_given_up_early(hass, world):  # noqa: F811
@@ -346,7 +396,7 @@ async def test_a_cycle_still_running_is_not_given_up_early(hass, world):  # noqa
     with freeze_time(TRIGGER):
         upstairs, _ = await setup_with_policy(hass)
         await report_risk(hass, upstairs, "Elevated")
-        await choose(hass, "Always ON")
+        await choose(hass, "As needed (eco)")
 
     with freeze_time(TRIGGER + timedelta(days=2)):
         hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
@@ -364,7 +414,7 @@ async def test_a_manual_mode_change_ends_the_cycle(hass, world):  # noqa: F811
     """Otherwise the flag is orphaned: set but with nothing left chasing it."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
 
     await hass.services.async_call(
@@ -388,7 +438,7 @@ async def test_a_manual_mode_change_does_not_leave_performance_armed(hass, world
     """
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     # Turning the tank OFF is the path that reproduces it: set_operation_mode
     # only rewrites smart_eco_last_heating_mode for the two heating modes, so an
@@ -429,7 +479,7 @@ async def test_taking_the_tank_back_stands_the_policy_down(hass, world):  # noqa
     """A standing policy must not immediately yank it into performance again."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
 
     await hass.services.async_call(
         "water_heater",
@@ -451,7 +501,7 @@ async def test_asking_for_performance_mid_cycle_does_not_end_it(hass, world):  #
     """Asking for what the cycle already wants is not taking it back."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     await hass.services.async_call(
         "water_heater",
@@ -472,7 +522,7 @@ async def test_a_cycle_is_not_stranded_when_smart_eco_is_switched_off(hass, worl
     """
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     hass.states.async_set(PV_EXCESS, STATE_OFF)
     await hass.async_block_till_done()
@@ -499,7 +549,7 @@ async def test_a_cycle_survives_a_reload(hass, world):  # noqa: F811
     """
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
     assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
 
     await hass.config_entries.async_reload(upstairs.entry_id)
@@ -508,7 +558,7 @@ async def test_a_cycle_survives_a_reload(hass, world):  # noqa: F811
     state = hass.states.get(UPSTAIRS)
     assert state.attributes["disinfection_active"] is True, "a cycle was lost on reload"
     assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_ON
-    assert hass.states.get(SELECT).state == "Always ON", (
+    assert hass.states.get(SELECT).state == "As needed (eco)", (
         "the select and the water heater disagree about the policy after a reload"
     )
 
@@ -517,7 +567,7 @@ async def test_a_finished_policy_does_not_come_back_after_a_reload(hass, world):
     """A one-shot that cleared itself must stay cleared."""
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Elevated")
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     await report_risk(hass, upstairs, "Low")
     assert hass.states.get(SELECT).state == "Off"
 
@@ -561,7 +611,7 @@ async def test_arming_the_policy_starts_a_cycle_on_a_tank_that_is_off(hass, worl
     await hass.async_block_till_done()
     assert hass.states.get(UPSTAIRS).state == STATE_OFF
 
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True, (
         "arming the policy on an off tank did nothing"
@@ -582,7 +632,7 @@ async def test_a_cycle_started_from_off_returns_the_tank_to_off(hass, world):  #
         "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True
     )
     await hass.async_block_till_done()
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
     assert hass.states.get(UPSTAIRS).attributes["disinfection_return_mode"] == STATE_OFF
 
     await report_risk(hass, upstairs, "Low")
@@ -600,7 +650,7 @@ async def test_a_standing_policy_still_leaves_an_off_tank_alone(hass, world):  #
     """
     upstairs, _ = await setup_with_policy(hass)
     await report_risk(hass, upstairs, "Low")
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
     await eco_off(hass)
     await hass.services.async_call(
         "water_heater", "turn_off", {"entity_id": UPSTAIRS}, blocking=True
@@ -629,7 +679,7 @@ async def report_low_without_a_new_cycle(hass, entry, completed_at):
     await hass.async_block_till_done()
 
 
-@pytest.mark.parametrize("option", ["Disinfect", "Disinfect ASAP"])
+@pytest.mark.parametrize("option", ["Once (eco)", "Once"])
 async def test_a_one_shot_on_a_low_tank_starts_now(hass, world, option):  # noqa: F811
     """It used to sit armed and silent until the interval lapsed, days later."""
     import homeassistant.util.dt as dt_util
@@ -652,7 +702,7 @@ async def test_a_low_verdict_alone_does_not_end_a_cycle_started_on_a_low_tank(ha
     upstairs, _ = await setup_with_policy(hass)
     old = dt_util.utcnow() - timedelta(days=6)
     await report_low_without_a_new_cycle(hass, upstairs, old)
-    await choose(hass, "Disinfect")
+    await choose(hass, "Once (eco)")
 
     await report_low_without_a_new_cycle(hass, upstairs, old)
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is True
@@ -671,7 +721,33 @@ async def test_always_on_still_waits_for_the_risk_to_rise(hass, world):  # noqa:
     await report_low_without_a_new_cycle(
         hass, upstairs, dt_util.utcnow() - timedelta(days=6)
     )
-    await choose(hass, "Always ON")
+    await choose(hass, "As needed (eco)")
 
     assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
     assert hass.states.get(UPSTAIRS).state == STATE_ELECTRIC
+
+
+async def test_a_give_up_backoff_survives_a_restart(hass, world):  # noqa: F811
+    """Otherwise every restart inside the interval restarts a hopeless cycle."""
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    with freeze_time(TRIGGER):
+        mock_restore_cache(
+            hass,
+            (
+                State(
+                    UPSTAIRS,
+                    STATE_ELECTRIC,
+                    {
+                        "temperature": 60,
+                        "legionella_mode": LEGIONELLA_MODE_ON,
+                        "disinfection_retry_after": (TRIGGER + timedelta(days=5)).isoformat(),
+                    },
+                ),
+            ),
+        )
+        upstairs, _ = await setup_with_policy(hass)
+        await report_risk(hass, upstairs, "Elevated")
+        assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+        assert hass.states.get(UPSTAIRS).attributes["disinfection_retry_after"] is not None

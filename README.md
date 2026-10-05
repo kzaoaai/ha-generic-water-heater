@@ -417,30 +417,40 @@ Before 3.0.0 these were the attributes `days_since_disinfection` and `hold_progr
 
 ### Running a disinfection cycle
 
-With the risk sensor enabled, each tank also gets a **Legionella Disinfection** select:
+With the risk sensor enabled, each tank also gets a **Legionella Disinfection** select. Each option
+says *when* it runs (**Once**, or **As needed** each time the interval lapses) and whether it waits
+for Smart Eco (**(eco)**: it only heats while the eco condition is met).
 
 | Option | Behaviour |
 | --- | --- |
-| `Off` | Inert. The default, and what a cycle returns to when it completes. |
-| `Disinfect` | Runs **one** cycle now, even if the risk is still `Low`, then clears itself back to `Off`. The cycle ends when a full hour at 60 °C completes after it started. Nothing ever starts again without you asking. |
-| `Disinfect ASAP` | The same one-shot, but it does not wait for the eco condition: starting a cycle also sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. Switching to it while a plain `Disinfect` cycle is already waiting upgrades that cycle in place. |
-| `Always ON` | Standing policy. Runs again every time the risk sensor reports the interval has lapsed. |
+| `Off` | Inert. The default, and what a one-shot returns to when it completes. |
+| `Once` | One cycle **now**, even if the risk is still `Low`, without waiting for the eco condition: starting it sets Smart Eco to `Off until target reached`, which stands the policy down and gives it back by itself. Then clears back to `Off`. Switching to it while a `Once (eco)` cycle is already waiting upgrades that cycle in place. |
+| `Once (eco)` | One cycle now, but it only heats while the eco condition is met, then clears back to `Off`. It completes only if a single eco window is long enough to reach 60 °C and hold it for an hour. |
+| `As needed` | Standing policy. Starts a cycle each time the risk turns `Elevated` (the interval has lapsed), standing Smart Eco down for it like `Once`. |
+| `As needed (eco)` | Standing policy, like `As needed`, but it only heats while the eco condition is met. |
+
+A cycle ends when a full hour at 60 °C completes after it started.
+
+Before 4.0.0 these were `Disinfect` (now `Once (eco)`), `Disinfect ASAP` (now `Once`) and `Always ON`
+(now `As needed (eco)`). A saved state carries over, but **an automation or script that selects an
+old label by name must be updated**: Home Assistant rejects the old label before this integration
+sees it.
 
 A cycle puts the tank into `performance` and leaves it there until a full hour at 60 °C completes
 after the cycle started, then hands it back to the mode it had. A one-shot starts as soon as you
-choose it; `Always ON` starts when the risk reads `Elevated` or `High`. The cycle is
+choose it; an `As needed` policy starts when the risk reads `Elevated` or `High`. The cycle is
 **goal-seeking, not timed** — it is a standing request for temperature, not a fixed run.
 
 It deliberately **does not outrank anything**:
 
-- **Smart Eco still gates it — unless you asked for ASAP.** The eco condition decides whether the
+- **Smart Eco still gates it — unless you chose an option without "(eco)".** The eco condition decides whether the
   tank actually heats; the cycle only asks. Because the request is also written to `smart_eco_last_heating_mode`, a cycle survives
   the nightly gap — the eco gate parks the mode at `off` and restores `performance` next time the
   condition returns, so a cycle can span several days without anyone re-arming it.
 - **A load shed still drops it.** Shedding protects the supply and is checked first, so a balancer
   can take the tank down mid-cycle with no special-casing. The request stays standing.
-- **A tank you switched off stays off — unless you ask for a cycle now.** `Disinfect` and
-  `Disinfect ASAP` are commands and will start on an `off` tank; `Always ON` is a standing policy
+- **A tank you switched off stays off — unless you ask for a cycle now.** `Once` and
+  `Once (eco)` are commands and will start on an `off` tank; the `As needed` options are standing policies
   and will not, because a policy should not overrule a mode you chose. This distinction carries
   the weight once Smart Eco is itself `Off`, since there is then no way to tell an eco-parked
   `off` from a deliberate one. A cycle
@@ -449,16 +459,16 @@ It deliberately **does not outrank anything**:
 
 **Taking the tank back ends the cycle.** Changing the operation mode yourself — or turning the tank
 off, at the wall or in the UI — stops the cycle and sets the policy to `Off`, so a standing
-`Always ON` cannot pull the tank straight back into `performance` the moment the risk sensor next
+`As needed` policy cannot pull the tank straight back into `performance` the moment the risk sensor next
 reports. Re-arming is one tap. Asking for `performance` yourself does *not* end a cycle, since that is what it
 already wants.
 
-**Ending an ASAP cycle gives Smart Eco back immediately**, rather than leaving it standing down
+**Ending a `Once` / `As needed` cycle gives Smart Eco back immediately**, rather than leaving it standing down
 until the time bound. That matters because a cancelled or abandoned cycle usually leaves the tank
 off, and an off tank never reports idle — so the "target reached" path could never fire and the
 full window would always elapse with the policy down for no live reason.
 
-If you want it to finish *faster*, choose `Disinfect ASAP` rather than pausing Smart Eco by hand.
+If you want it to finish *faster*, choose `Once` rather than pausing Smart Eco by hand.
 It does the same thing — stands the policy down — but through `Off until target reached`, so the
 policy is restored for you instead of waiting to be remembered. On a tank whose element cannot
 reach 60 °C inside one eco window, standing the policy down is the only way a cycle will ever
@@ -468,7 +478,9 @@ complete.
 actually got. That bound is on the calendar rather than on run length on purpose: most of a hold is
 banked with the element already off, coasting down, so a run-length cap would abort precisely the
 part that earns the credit. A tank that has not got there in three days is not going to without
-help.
+help. A one-shot then returns to `Off`. An `As needed` policy stays on but waits one full interval
+before trying again; otherwise the risk, still `Elevated`, would restart the same failing cycle at
+once. Choosing a policy yourself clears that wait.
 
 ### Reaching a disinfection temperature
 

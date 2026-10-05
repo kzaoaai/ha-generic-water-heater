@@ -15,6 +15,7 @@ from . import (
     LEGIONELLA_MODE_ON,
     LEGIONELLA_MODE_UNTIL_DISINFECTED,
     LEGIONELLA_MODE_ASAP,
+    LEGIONELLA_MODE_ON_ASAP,
     SMART_ECO_MODE_ALWAYS_ON,
     SMART_ECO_MODE_AUTO_RESUME,
     SMART_ECO_MODE_OFF,
@@ -34,11 +35,14 @@ _OPTION_TO_MODE = {
 }
 _MODE_TO_OPTION = {value: key for key, value in _OPTION_TO_MODE.items()}
 
+# Each label says WHEN it runs (Once / As needed) and whether it waits for the
+# Smart Eco condition ("(eco)").
 _OPTION_TO_LEGIONELLA = {
     "Off": LEGIONELLA_MODE_OFF,
-    "Disinfect": LEGIONELLA_MODE_UNTIL_DISINFECTED,
-    "Disinfect ASAP": LEGIONELLA_MODE_ASAP,
-    "Always ON": LEGIONELLA_MODE_ON,
+    "Once": LEGIONELLA_MODE_ASAP,
+    "Once (eco)": LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    "As needed": LEGIONELLA_MODE_ON_ASAP,
+    "As needed (eco)": LEGIONELLA_MODE_ON,
 }
 _LEGIONELLA_TO_OPTION = {
     value: key for key, value in _OPTION_TO_LEGIONELLA.items()
@@ -46,9 +50,16 @@ _LEGIONELLA_TO_OPTION = {
 # Labels these options used to carry. A select restores from its own last
 # STATE STRING, so without this a rename silently drops the restored value and
 # the policy reads Off after an upgrade.
+#
+# This only covers restore. A service call passing an old label is rejected by
+# the select component before this entity sees it, which is why the 4.0.0
+# rename is a breaking change for automations.
 _LEGACY_LEGIONELLA_OPTIONS = {
     "Until disinfected": LEGIONELLA_MODE_UNTIL_DISINFECTED,
     "On": LEGIONELLA_MODE_ON,
+    "Disinfect": LEGIONELLA_MODE_UNTIL_DISINFECTED,
+    "Disinfect ASAP": LEGIONELLA_MODE_ASAP,
+    "Always ON": LEGIONELLA_MODE_ON,
 }
 
 

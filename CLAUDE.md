@@ -129,8 +129,10 @@ apart still count as a person — nothing distinguishes a fast replay from a han
 
 ### A disinfection cycle ends on a completed hold, not on the risk verdict
 
-One-shots (`Disinfect`, `Disinfect ASAP`) start immediately even when risk is Low; `Always ON` waits
-for Elevated. So completion is "a hold completed after `disinfection_started_at`"
+One-shots (`Once`, `Once (eco)`) start immediately even when risk is Low; the standing `As needed`
+options wait for Elevated, and after a 3-day give-up they stay armed but back off one interval
+(`disinfection_retry_after`). Internal mode values keep their pre-4.0.0 spellings because they are
+stored state; only the select labels changed. So completion is "a hold completed after `disinfection_started_at`"
 (`_cycle_completed_since_start`); reading "risk is Low" would end a cycle started on a Low tank the
 moment it began.
 

@@ -9,6 +9,7 @@ not wanting to leave eco off by accident.
 from datetime import timedelta
 
 from freezegun import freeze_time
+import pytest
 from homeassistant.const import STATE_ON
 import homeassistant.util.dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
@@ -213,7 +214,7 @@ async def test_disinfect_asap_stands_eco_down_by_itself(hass, world):  # noqa: F
 
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once"}, blocking=True,
     )
     await hass.async_block_till_done()
 
@@ -232,7 +233,7 @@ async def test_plain_disinfect_leaves_eco_alone(hass, world):  # noqa: F811
 
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once (eco)"}, blocking=True,
     )
     await hass.async_block_till_done()
 
@@ -251,7 +252,7 @@ async def test_eco_is_not_given_back_while_the_cycle_is_still_running(hass, worl
     await report_risk(hass, upstairs, "Elevated")
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once"}, blocking=True,
     )
     await hass.async_block_till_done()
 
@@ -281,7 +282,7 @@ async def test_a_load_shed_mid_cycle_does_not_hand_eco_back(hass, world):  # noq
     await report_risk(hass, upstairs, "Elevated")
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once"}, blocking=True,
     )
     await hass.async_block_till_done()
     assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET
@@ -476,14 +477,14 @@ async def test_switching_to_asap_mid_cycle_stands_eco_down(hass, world):  # noqa
 
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once (eco)"}, blocking=True,
     )
     await hass.async_block_till_done()
     assert eco_mode(hass) == SMART_ECO_MODE_AUTO_RESUME
 
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once"}, blocking=True,
     )
     await hass.async_block_till_done()
 
@@ -503,7 +504,7 @@ async def test_cancelling_an_asap_cycle_hands_eco_back(hass, world):  # noqa: F8
     await report_risk(hass, upstairs, "Elevated")
     await hass.services.async_call(
         "select", "select_option",
-        {"entity_id": LEG_SELECT, "option": "Disinfect ASAP"}, blocking=True,
+        {"entity_id": LEG_SELECT, "option": "Once"}, blocking=True,
     )
     await hass.async_block_till_done()
     assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET
@@ -518,3 +519,86 @@ async def test_cancelling_an_asap_cycle_hands_eco_back(hass, world):  # noqa: F8
     assert eco_mode(hass) == SMART_ECO_MODE_AUTO_RESUME, (
         "cancelling the cycle left Smart Eco standing down until the bound"
     )
+
+
+# ---------------------------------------------------------------------------
+# "As needed": the standing policy that does not wait for eco (4.0.0)
+# ---------------------------------------------------------------------------
+
+
+async def test_as_needed_stands_eco_down_when_the_interval_lapses(hass, world):  # noqa: F811
+    upstairs, _ = await setup_with_policy_blocked(hass)
+    with freeze_time(TRIGGER):
+        await report_risk(hass, upstairs, "Elevated")
+        await hass.services.async_call(
+            "select", "select_option",
+            {"entity_id": LEG_SELECT, "option": "As needed"}, blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    state = hass.states.get(UPSTAIRS)
+    assert state.attributes["disinfection_active"] is True
+    assert eco_mode(hass) == SMART_ECO_MODE_OFF_UNTIL_TARGET
+    assert state.state == "performance"
+
+
+async def test_as_needed_eco_waits_for_the_eco_window(hass, world):  # noqa: F811
+    upstairs, _ = await setup_with_policy_blocked(hass)
+    await report_risk(hass, upstairs, "Elevated")
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "As needed (eco)"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert eco_mode(hass) != SMART_ECO_MODE_OFF_UNTIL_TARGET
+    assert hass.states.get(UPSTAIRS).state == "off"
+
+
+async def test_as_needed_does_not_start_on_a_low_tank(hass, world):  # noqa: F811
+    """Standing, not a command: nothing to do until the interval lapses."""
+    upstairs, _ = await setup_with_policy_blocked(hass)
+    await report_risk(hass, upstairs, "Low")
+    await hass.services.async_call(
+        "select", "select_option",
+        {"entity_id": LEG_SELECT, "option": "As needed"}, blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).attributes["disinfection_active"] is False
+    assert eco_mode(hass) != SMART_ECO_MODE_OFF_UNTIL_TARGET
+
+
+@pytest.mark.parametrize(
+    ("old_label", "new_label"),
+    [
+        ("Disinfect", "Once (eco)"),
+        ("Disinfect ASAP", "Once"),
+        ("Always ON", "As needed (eco)"),
+        ("Until disinfected", "Once (eco)"),
+        ("On", "As needed (eco)"),
+    ],
+)
+async def test_an_old_label_restores_as_its_new_name(hass, world, old_label, new_label):  # noqa: F811
+    """A select restores from its own last STATE STRING; 4.0.0 renamed them all."""
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    mock_restore_cache(hass, (State(LEG_SELECT, old_label),))
+    hass.states.async_set(PV_EXCESS, "off")
+    await setup_both(hass, enable_legionella_sensor=True)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(LEG_SELECT).state == new_label
+
+
+async def test_an_old_label_in_a_service_call_is_rejected(hass, world):  # noqa: F811
+    """Why the rename is breaking: automations must be updated with it."""
+    from homeassistant.exceptions import ServiceValidationError
+
+    await setup_with_policy_blocked(hass)
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "select", "select_option",
+            {"entity_id": LEG_SELECT, "option": "Disinfect"}, blocking=True,
+        )
