@@ -220,7 +220,7 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
-- `water_heater.py` (around line 144) calls `device_registry.async_update_device(...,
+- `water_heater.py` calls `device_registry.async_update_device(...,
   remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to
   `async_remove_device` / `new_config_entry_id`.
 - `manifest.json` `issue_tracker` points at `ha_generic_water_heater` (underscores); the repo is
