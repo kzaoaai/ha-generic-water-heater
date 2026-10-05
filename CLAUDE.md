@@ -206,7 +206,7 @@ options form.
 | `water_heater.py` | the entity, the control loop, Smart Eco, disinfection, load-shed services |
 | `fleet.py` | switch-on staggering; pure logic, imports nothing from Home Assistant |
 | `config_flow.py` | sectioned config/options forms, flat storage |
-| `sensor.py` | Smart Eco state, legionella risk, max-temp history, Days Until Disinfection, Disinfection Hold Progress |
+| `sensor.py` | Smart Eco state, legionella risk, max-temp history, Disinfection Due In, Disinfection Hold Progress |
 | `temperature_filter.py` | single-sample spike rejection; pure logic, no Home Assistant imports |
 | `temperature_tracking.py` | the HA subscription wrapper every temperature consumer uses |
 | `select.py` | Smart Eco Mode and Legionella Disinfection selects |

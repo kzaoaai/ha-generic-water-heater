@@ -18,6 +18,7 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
@@ -245,6 +246,7 @@ class SmartEcoStateSensor(SensorEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_name = "Smart Eco State"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self,
@@ -303,6 +305,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_has_entity_name = True
     _attr_name = "Highest Temperature (7 days)"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False
 
     def __init__(
@@ -927,6 +930,10 @@ class _LegionellaDetailSensor(SensorEntity):
     _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_state_class = SensorStateClass.MEASUREMENT
+    # Explains the heater's behaviour rather than controls it, so it lives in
+    # the device page's Diagnostic section; the Legionella Risk verdict and Hot
+    # Water In Use stay primary.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _label: str
     _key: str
 
@@ -977,7 +984,9 @@ class DaysUntilDisinfectionSensor(_LegionellaDetailSensor):
     to count towards, and inventing one would read as a schedule.
     """
 
-    _label = "Days Until Disinfection"
+    # Named to sort beside Disinfection Hold Progress; the unique_id key keeps
+    # its old name so existing installs keep their entity_id.
+    _label = "Disinfection Due In"
     _key = "legionella_days_until_disinfection"
     _attr_native_unit_of_measurement = UnitOfTime.DAYS
     _attr_suggested_display_precision = 1

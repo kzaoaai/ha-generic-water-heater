@@ -367,10 +367,15 @@ numbers behind it are attributes, including `last_disinfection_at`, `hours_in_gr
 Two more figures are entities of their own, so they keep history and can drive automations
 directly:
 
-- **Days Until Disinfection**: days left before the interval lapses, negative once it is overdue.
-  `unknown` until a cycle has been seen.
+- **Disinfection Due In**: days left before the interval lapses, negative once it is overdue.
+  `unknown` until a cycle has been seen. (Named "Days Until Disinfection" in 3.0.0; existing
+  installs keep their entity ID.)
 - **Disinfection Hold Progress**: minutes banked toward the current hour at 60 °C. It is live, so
   a manual high-temperature session can be watched as it accumulates.
+
+Both are diagnostic entities, as are Smart Eco State and Highest Temperature (7 days): they sit in
+the device page's Diagnostic section, stay usable in automations and dashboards, and are left out of
+auto-generated dashboards and voice assistants.
 
 Before 3.0.0 these were the attributes `days_since_disinfection` and `hold_progress_minutes`.
 

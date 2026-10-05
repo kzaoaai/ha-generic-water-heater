@@ -24,18 +24,19 @@ from tests.test_integration_setup import (  # noqa: F401  (fixtures)
 )
 
 RISK = "sensor.upstairs_legionella_risk"
-DAYS_UNTIL = "sensor.upstairs_days_until_disinfection"
+DAYS_UNTIL = "sensor.upstairs_disinfection_due_in"
 PROGRESS = "sensor.upstairs_disinfection_hold_progress"
 START = datetime(2026, 10, 4, 9, 0, tzinfo=timezone.utc)
 
 
-async def setup_entry(hass, enabled=True):
+async def setup_entry(hass, enabled=True, **extra):
     hass.states.async_set(UPSTAIRS_SENSOR, "45.0")
     entry = build_entry(
         "Upstairs",
         UPSTAIRS_SWITCH,
         UPSTAIRS_SENSOR,
         **{CONF_ENABLE_LEGIONELLA_SENSOR: enabled, CONF_LEGIONELLA_INTERVAL_DAYS: 10},
+        **extra,
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -97,3 +98,50 @@ async def test_days_until_counts_down_from_the_interval_and_goes_negative(hass, 
         async_fire_time_changed(hass)
         await hass.async_block_till_done()
         assert float(hass.states.get(DAYS_UNTIL).state) == pytest.approx(-1.0, abs=0.05)
+
+
+async def test_explanatory_sensors_are_diagnostic_and_the_verdict_is_not(hass, world):  # noqa: F811
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.helpers.entity import EntityCategory
+
+    hass.states.async_set("binary_sensor.pv_power_excess", "on")
+    await setup_entry(hass, enable_max_temp_history_sensor=True)
+    registry = er.async_get(hass)
+    for entity_id in (
+        DAYS_UNTIL,
+        PROGRESS,
+        "sensor.upstairs_smart_eco_state",
+        "sensor.upstairs_highest_temperature_7_days",
+    ):
+        assert registry.async_get(entity_id).entity_category is EntityCategory.DIAGNOSTIC, entity_id
+    assert registry.async_get(RISK).entity_category is None
+
+
+async def test_the_rename_keeps_an_existing_entity_id(hass, world):  # noqa: F811
+    """Renamed from "Days Until Disinfection" in 3.1.0; the unique_id did not move."""
+    from homeassistant.helpers import entity_registry as er
+    from homeassistant.const import CONF_NAME
+
+    from custom_components.generic_water_heater import DOMAIN
+
+    registry = er.async_get(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "45.0")
+    entry = build_entry(
+        "Upstairs",
+        UPSTAIRS_SWITCH,
+        UPSTAIRS_SENSOR,
+        **{CONF_ENABLE_LEGIONELLA_SENSOR: True, CONF_LEGIONELLA_INTERVAL_DAYS: 10},
+    )
+    entry.add_to_hass(hass)
+    registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{DOMAIN}_{entry.entry_id}_legionella_days_until_disinfection",
+        config_entry=entry,
+        suggested_object_id="upstairs_days_until_disinfection",
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.upstairs_days_until_disinfection") is not None
+    assert hass.states.get(DAYS_UNTIL) is None
