@@ -133,3 +133,17 @@ async def test_the_link_survives_a_reload_and_follows_a_new_meter(hass, world):
     )
     await _reconfigure(hass, entry, power_sensor="sensor.element_meter_2")
     assert _via(hass, relay) == meter2.id
+
+
+async def test_the_link_goes_on_the_heaters_own_device(hass, world):
+    """The page the person looks at is the water_heater entity's device, which
+    need not be the switch's (4.3.0 linked the switch's device; seen on
+    hardware 2026-10-08). Here the switch has no device at all, so the heater
+    gets its own: that is the device that must point at the meter."""
+    _, relay, meter = _devices(hass)
+    er.async_get(hass).async_update_entity(UPSTAIRS_SWITCH, device_id=None)
+    entry = await _setup(hass, power_sensor=METER)
+    heater = er.async_get(hass).async_get("water_heater.upstairs")
+    assert heater.device_id not in (None, relay.id)
+    assert dr.async_get(hass).async_get(heater.device_id).via_device_id == meter.id
+    assert _via(hass, relay) is None

@@ -167,10 +167,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
             if not is_standalone:
                 device_registry.async_update_device(dev.id, remove_config_entry_id=entry.entry_id)
 
-    await _async_link_meter_device(
-        hass, entry.entry_id, current_device_id, data.get(CONF_POWER_SENSOR)
-    )
-
     entity = GenericWaterHeater(
         hass,
         name,
@@ -224,6 +220,10 @@ async def _async_link_meter_device(
     the meter through `via_device` - the only device-to-device link Home
     Assistant shows there. The same device, no meter, or no heater device: no
     link.
+
+    `heater_device_id` is the device the water_heater entity is registered on
+    (its page), resolved after the entity is added - not the heater switch's
+    device, which can differ.
 
     The link is recorded per entry in a Store, and only a link this integration
     made is ever replaced or cleared: a `via_device` the switch's own
@@ -997,6 +997,19 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
         await super().async_added_to_hass()
+
+        # The meter link goes on the device THIS entity is registered on - the
+        # page the person looks at. That is not always the heater switch's own
+        # device: an install can carry a separate device sharing the switch's
+        # identifiers, and 4.3.0 linked the switch's device instead (seen on
+        # hardware 2026-10-08, fixed in 4.3.1).
+        if self.registry_entry is not None:
+            await _async_link_meter_device(
+                self.hass,
+                self._entry_id,
+                self.registry_entry.device_id,
+                self._power_sensor,
+            )
 
         self._fleet.register(
             self._entry_id,

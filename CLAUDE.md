@@ -162,8 +162,10 @@ created from one of this integration's own entities, and the config flow refuses
 ### "Connected via" is the meter link, and only ours is ever touched
 
 When the configured meter is on a different device than the heater switch,
-`_async_link_meter_device` sets the heater device's `via_device` to the meter's device, so its
-page links there. That device belongs to the switch's integration, so the link is recorded per
+`_async_link_meter_device` sets `via_device` to the meter's device on **the device the
+water_heater entity is registered on** (resolved in `async_added_to_hass`), so its page links
+there. That is not always the switch's own device: installs can carry a separate heater device
+sharing the switch's identifiers, and 4.3.0 linked the switch's device instead. That device belongs to the switch's integration, so the link is recorded per
 entry in the `generic_water_heater.meter_links` Store, and **only a link this integration made
 is ever replaced or cleared** — a `via_device` the switch's integration set (a real hub) is never
 overwritten, and a link someone changed since is left alone. Integrations that pass no
