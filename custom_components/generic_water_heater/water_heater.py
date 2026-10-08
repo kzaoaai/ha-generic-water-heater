@@ -38,6 +38,7 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_send,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.template import Template, result_as_boolean
@@ -166,6 +167,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
             if not is_standalone:
                 device_registry.async_update_device(dev.id, remove_config_entry_id=entry.entry_id)
 
+    await _async_link_meter_device(
+        hass, entry.entry_id, current_device_id, data.get(CONF_POWER_SENSOR)
+    )
+
     entity = GenericWaterHeater(
         hass,
         name,
@@ -204,6 +209,64 @@ async def async_unload_entry(hass, entry):
     """Unload a config entry for this platform."""
     # Entities are removed automatically when the config entry is removed/unloaded
     return True
+
+
+METER_LINK_STORE = f"{DOMAIN}.meter_links"
+
+
+async def _async_link_meter_device(
+    hass, entry_id: str, heater_device_id: str | None, power_sensor: str | None
+) -> None:
+    """Point the heater's device at its meter's device ("Connected via").
+
+    When the meter lives on a different device than the heater switch (a relay
+    fed by a separate metering breaker), the heater's device page gets a link to
+    the meter through `via_device` - the only device-to-device link Home
+    Assistant shows there. The same device, no meter, or no heater device: no
+    link.
+
+    The link is recorded per entry in a Store, and only a link this integration
+    made is ever replaced or cleared: a `via_device` the switch's own
+    integration set (a real hub) is left alone, and so is any other.
+    """
+    store = Store(hass, 1, METER_LINK_STORE)
+    links: dict = await store.async_load() or {}
+    mine = links.get(entry_id) or {}
+    device_registry = dr.async_get(hass)
+
+    meter_device_id = None
+    sensor_id = (power_sensor or "").strip()
+    if sensor_id:
+        meter_entry = er.async_get(hass).async_get(sensor_id)
+        if meter_entry is not None:
+            meter_device_id = meter_entry.device_id
+    target = (
+        meter_device_id
+        if heater_device_id and meter_device_id and meter_device_id != heater_device_id
+        else None
+    )
+
+    # Undo a link we made on a device that is no longer this heater's, or that
+    # should no longer carry it - but only if it is still ours.
+    old_device = mine.get("device")
+    old_via = mine.get("via")
+    if old_device and (old_device != heater_device_id or old_via != target):
+        dev = device_registry.async_get(old_device)
+        if dev is not None and dev.via_device_id == old_via:
+            device_registry.async_update_device(old_device, via_device_id=None)
+        links.pop(entry_id, None)
+
+    if target:
+        dev = device_registry.async_get(heater_device_id)
+        if dev is not None and dev.via_device_id in (None, target):
+            if dev.via_device_id != target:
+                device_registry.async_update_device(
+                    heater_device_id, via_device_id=target
+                )
+            links[entry_id] = {"device": heater_device_id, "via": target}
+
+    if links != (await store.async_load() or {}):
+        await store.async_save(links)
 
 
 class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):

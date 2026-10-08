@@ -159,6 +159,17 @@ created from one of this integration's own entities, and the config flow refuses
 `power_sensor` (the selector cannot filter by platform). Consumers read the meter through the
 `power_sensor` attribute, never the mirror.
 
+### "Connected via" is the meter link, and only ours is ever touched
+
+When the configured meter is on a different device than the heater switch,
+`_async_link_meter_device` sets the heater device's `via_device` to the meter's device, so its
+page links there. That device belongs to the switch's integration, so the link is recorded per
+entry in the `generic_water_heater.meter_links` Store, and **only a link this integration made
+is ever replaced or cleared** — a `via_device` the switch's integration set (a real hub) is never
+overwritten, and a link someone changed since is left alone. Integrations that pass no
+`via_device` on their own device updates leave ours in place; one that does will replace it,
+harmlessly.
+
 ### A config-entry reload does not re-import module code
 
 Only a restart loads changed Python. Stale traceback line numbers are the tell. When a change is
