@@ -6,6 +6,7 @@ from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import homeassistant.util.dt as dt_util
@@ -116,8 +117,55 @@ LEGACY_CONF_ECO_ENTITY = "eco_entity"
 LEGACY_CONF_ECO_VALUE = "eco_value"
 
 
-def async_resolve_heater_device(hass: HomeAssistant, heater_entity_id: str):
+# The first core verified to link devices that share an identifier.
+LINKED_DEVICES_SINCE = (2026, 9)
+
+
+def async_meter_identifiers(
+    hass: HomeAssistant, heater_entity_id: str, power_sensor: str | None
+) -> set:
+    """The meter device's identifiers, when it is not the heater switch's device.
+
+    Added to the heater's device_info so Home Assistant lists the meter under
+    the heater device's "Linked devices" (devices sharing an identifier are
+    linked, 2026.9+) - the same way the switch's device is already listed.
+    Declared, not written to the registry: Home Assistant resets a device's
+    identifiers to what its entities declare on every reload (measured on
+    2026.9.4), so a hand-written identifier would not survive, and clearing the
+    meter removes the link by itself.
+    """
+    # Before 2026.9 an identifier cannot be on two devices: declaring the
+    # meter's would make the heater's entities fail to set up (collision).
+    # 2026.6 still refuses; 2026.9.4 links. 2026.7-8 untested, so not trusted.
+    if (MAJOR_VERSION, MINOR_VERSION) < LINKED_DEVICES_SINCE:
+        return set()
+    sensor_id = (power_sensor or "").strip()
+    if not sensor_id:
+        return set()
+    ereg, dreg = er.async_get(hass), dr.async_get(hass)
+    meter = ereg.async_get(sensor_id)
+    switch = ereg.async_get(heater_entity_id)
+    if meter is None or not meter.device_id:
+        return set()
+    # A short-circuit, not a safety guard: a meter on the switch's own device
+    # carries the switch's identifiers, which the heater device already has.
+    if switch is not None and switch.device_id == meter.device_id:
+        return set()
+    # Belt and braces, not covered: our own mirror sits on the heater's own
+    # device, whose identifiers it already has. The config flow refuses it too.
+    if meter.platform == DOMAIN:
+        return set()
+    meter_device = dreg.async_get(meter.device_id)
+    return set(meter_device.identifiers) if meter_device is not None else set()
+
+
+def async_resolve_heater_device(
+    hass: HomeAssistant, heater_entity_id: str, power_sensor: str | None = None
+):
     """Return (device identifiers, whether that device has a usable name).
+
+    The identifiers are the heater switch device's, plus the meter device's
+    when it is a different device (async_meter_identifiers).
 
     ``has_name`` is False when no device is linked to the heater switch, and
     also when a device IS linked but carries no name of its own. Some
@@ -135,7 +183,14 @@ def async_resolve_heater_device(hass: HomeAssistant, heater_entity_id: str):
     if device_entry is None:
         return None, False
 
-    return device_entry.identifiers, bool(device_entry.name_by_user or device_entry.name)
+    # The meter identifiers here are belt and braces, not covered: the
+    # water_heater entity declares them too, and that alone links the device.
+    # Kept so every entity on the device declares the same identifiers.
+    return (
+        set(device_entry.identifiers)
+        | async_meter_identifiers(hass, heater_entity_id, power_sensor),
+        bool(device_entry.name_by_user or device_entry.name),
+    )
 
 
 def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:

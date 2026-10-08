@@ -7,6 +7,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import (
+    CONF_POWER_SENSOR,
     CONF_ECO_TEMPLATE,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_HEATER,
@@ -78,7 +79,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
 
     device_identifiers, device_has_name = async_resolve_heater_device(
-        hass, heater_entity_id
+        hass, heater_entity_id, data.get(CONF_POWER_SENSOR)
     )
 
     entities = []

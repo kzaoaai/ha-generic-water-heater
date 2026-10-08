@@ -190,7 +190,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     name = data.get(CONF_NAME)
 
     device_identifiers, device_has_name = async_resolve_heater_device(
-        hass, heater_entity_id
+        hass, heater_entity_id, data.get(CONF_POWER_SENSOR)
     )
 
     if eco_template is not None:

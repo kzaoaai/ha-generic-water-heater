@@ -159,18 +159,25 @@ created from one of this integration's own entities, and the config flow refuses
 `power_sensor` (the selector cannot filter by platform). Consumers read the meter through the
 `power_sensor` attribute, never the mirror.
 
-### "Connected via" is the meter link, and only ours is ever touched
+### The meter is a "Linked device", declared - never written to the registry
 
-When the configured meter is on a different device than the heater switch,
-`_async_link_meter_device` sets `via_device` to the meter's device on **the device the
-water_heater entity is registered on** (resolved in `async_added_to_hass`), so its page links
-there. That is not always the switch's own device: installs can carry a separate heater device
-sharing the switch's identifiers, and 4.3.0 linked the switch's device instead. That device belongs to the switch's integration, so the link is recorded per
-entry in the `generic_water_heater.meter_links` Store, and **only a link this integration made
-is ever replaced or cleared** — a `via_device` the switch's integration set (a real hub) is never
-overwritten, and a link someone changed since is left alone. Integrations that pass no
-`via_device` on their own device updates leave ours in place; one that does will replace it,
-harmlessly.
+Home Assistant 2026.9+ gives each integration its own device and lists, as **Linked devices**,
+the devices that share an identifier. The heater's device carries its switch device's
+identifiers, which is how the switch is listed. When the configured meter is on a different
+device, `async_meter_identifiers` adds the meter device's identifiers to the heater's
+**device_info**, so the meter is listed the same way. Declared, not written: 2026.9 resets a
+device's identifiers to what its entities declare on every reload (measured on 2026.9.4), so a
+hand-written identifier does not survive, and clearing the meter unlinks it by itself.
+
+**Before 2026.9 an identifier cannot be on two devices**: declaring the meter's would make the
+heater's entities fail to set up. `LINKED_DEVICES_SINCE` gates it (2026.6 still refuses;
+2026.9.4 links; 2026.7-8 untested). The repo's test venv is 2025.1, where the link tests skip;
+they were run on a scratch 2026.9.4 venv. On that core `test_a_stale_switch_event_is_not_a_person`
+fails at 4.3.1 too, before this change: an open item, below.
+
+4.3.x used `via_device` ("Connected via") for this, which was not what was wanted. 4.4.0 clears
+a link 4.3.x recorded in the `generic_water_heater.meter_links` Store, only if it is unchanged
+since, and drops the record.
 
 ### A config-entry reload does not re-import module code
 
@@ -257,6 +264,10 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 ---
 
 ## Open items
+
+- On Home Assistant 2026.9.4, `test_startup_grace.py::test_a_stale_switch_event_is_not_a_person`
+  fails (also at 4.3.1, so not the linked-device change); the event loop reports the test taking
+  121 s of frozen time. Not investigated. The repo's venv (2025.1) passes it.
 
 - `water_heater.py` calls `device_registry.async_update_device(...,
   remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to

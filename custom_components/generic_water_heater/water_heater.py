@@ -48,6 +48,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import homeassistant.util.dt as dt_util
 
 from . import (
+    async_meter_identifiers,
     CONF_COLD_TOLERANCE,
     CONF_DEBUG_LOGGING,
     CONF_ECO_TEMPLATE,
@@ -152,7 +153,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     if entity_entry and entity_entry.device_id:
         device_entry = device_registry.async_get(entity_entry.device_id)
         if device_entry:
-            device_identifiers = device_entry.identifiers
+            # Plus the meter device's, when separate: the meter is then listed
+            # under the heater device's "Linked devices" (async_meter_identifiers).
+            device_identifiers = set(device_entry.identifiers) | async_meter_identifiers(
+                hass, heater_entity_id, data.get(CONF_POWER_SENSOR)
+            )
             current_device_id = device_entry.id
 
     # Cleanup old device links for this config entry
@@ -213,60 +218,29 @@ METER_LINK_STORE = f"{DOMAIN}.meter_links"
 async def _async_link_meter_device(
     hass, entry_id: str, heater_device_id: str | None, power_sensor: str | None
 ) -> None:
-    """Point the heater's device at its meter's device ("Connected via").
+    """Undo 4.3.x's "Connected via" meter link, if it is still ours.
 
-    When the meter lives on a different device than the heater switch (a relay
-    fed by a separate metering breaker), the heater's device page gets a link to
-    the meter through `via_device` - the only device-to-device link Home
-    Assistant shows there. The same device, no meter, or no heater device: no
-    link.
-
-    `heater_device_id` is the device the water_heater entity is registered on
-    (its page), resolved after the entity is added - not the heater switch's
-    device, which can differ.
-
-    The link is recorded per entry in a Store, and only a link this integration
-    made is ever replaced or cleared: a `via_device` the switch's own
-    integration set (a real hub) is left alone, and so is any other.
+    4.3.x linked the meter through `via_device` and recorded each link in a
+    Store. Since 4.4.0 the meter is listed under "Linked devices" instead, by
+    declaring its device's identifiers in the heater's device_info
+    (async_meter_identifiers), so the old link is cleared here - only if it is
+    unchanged since, so a `via_device` anyone else set is never touched - and
+    its record dropped. The arguments beyond entry_id are unused; kept so the
+    call site reads the same.
     """
     store = Store(hass, 1, METER_LINK_STORE)
-    links: dict = await store.async_load() or {}
-    mine = links.get(entry_id) or {}
-    device_registry = dr.async_get(hass)
-
-    meter_device_id = None
-    sensor_id = (power_sensor or "").strip()
-    if sensor_id:
-        meter_entry = er.async_get(hass).async_get(sensor_id)
-        if meter_entry is not None:
-            meter_device_id = meter_entry.device_id
-    target = (
-        meter_device_id
-        if heater_device_id and meter_device_id and meter_device_id != heater_device_id
-        else None
-    )
-
-    # Undo a link we made on a device that is no longer this heater's, or that
-    # should no longer carry it - but only if it is still ours.
-    old_device = mine.get("device")
-    old_via = mine.get("via")
-    if old_device and (old_device != heater_device_id or old_via != target):
-        dev = device_registry.async_get(old_device)
-        if dev is not None and dev.via_device_id == old_via:
-            device_registry.async_update_device(old_device, via_device_id=None)
-        links.pop(entry_id, None)
-
-    if target:
-        dev = device_registry.async_get(heater_device_id)
-        if dev is not None and dev.via_device_id in (None, target):
-            if dev.via_device_id != target:
-                device_registry.async_update_device(
-                    heater_device_id, via_device_id=target
-                )
-            links[entry_id] = {"device": heater_device_id, "via": target}
-
-    if links != (await store.async_load() or {}):
-        await store.async_save(links)
+    loaded: dict = await store.async_load() or {}
+    mine = loaded.get(entry_id)
+    if not mine:
+        return
+    device_id, via = mine.get("device"), mine.get("via")
+    if device_id and via:
+        device_registry = dr.async_get(hass)
+        dev = device_registry.async_get(device_id)
+        if dev is not None and dev.via_device_id == via:
+            device_registry.async_update_device(device_id, via_device_id=None)
+    links = {k: v for k, v in loaded.items() if k != entry_id}
+    await store.async_save(links)
 
 
 class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):

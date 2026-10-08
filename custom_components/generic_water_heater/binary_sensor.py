@@ -18,6 +18,7 @@ from homeassistant.helpers.event import async_call_later
 import homeassistant.util.dt as dt_util
 
 from . import (
+    CONF_POWER_SENSOR,
     CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_HEATER,
     CONF_SENSOR,
@@ -98,7 +99,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         return
 
     device_identifiers, device_has_name = async_resolve_heater_device(
-        hass, data.get(CONF_HEATER)
+        hass, data.get(CONF_HEATER), data.get(CONF_POWER_SENSOR)
     )
 
     async_add_entities(
