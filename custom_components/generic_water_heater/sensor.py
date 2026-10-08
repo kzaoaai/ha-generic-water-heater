@@ -19,11 +19,16 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_send,
 )
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
+    CONF_POWER_SENSOR,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
     CONF_ECO_TEMPLATE,
@@ -231,6 +236,23 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     name=name,
                     entry_id=entry.entry_id,
                     runtime=hass.data[DOMAIN][entry.entry_id],
+                    device_identifiers=device_identifiers,
+                    device_has_name=device_has_name,
+                )
+            )
+
+    power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
+    if power_sensor is not None:
+        source = er.async_get(hass).async_get(power_sensor)
+        # Never mirror a mirror (config_flow._power_sensor_errors refuses one
+        # on submit; this covers an entry written another way).
+        if source is None or source.platform != DOMAIN:
+            entities.append(
+                ElementPowerSensor(
+                    hass=hass,
+                    entry_id=entry.entry_id,
+                    name=name,
+                    source_entity_id=power_sensor,
                     device_identifiers=device_identifiers,
                     device_has_name=device_has_name,
                 )
@@ -1027,3 +1049,97 @@ class DisinfectionHoldProgressSensor(_LegionellaDetailSensor):
     @property
     def native_value(self) -> float | None:
         return self._runtime.get("legionella_hold_progress_minutes")
+
+
+class ElementPowerSensor(SensorEntity):
+    """The element's draw, mirrored from its configured meter onto this device.
+
+    For the UI only: the heater's device page shows what it draws beside its
+    temperature and state. The meter stays the source of truth - it is what the
+    `power_sensor` attribute names, and what any consumer reads.
+
+    It must never be counted twice:
+    - NO state_class: no long-term statistics, so the Energy dashboard cannot
+      offer it and nothing sums it into energy. (The meter carries those.)
+    - Named "Power (mirror)", so its entity id ends `_power_mirror`, never
+      `_power`: a template summing every `..._power` sensor in watts exists on
+      the author's install (dormant, 2026-10-08) and would otherwise count
+      the element twice. `mirror_of` names the meter for anyone configuring a
+      load balancer or a template by hand.
+    - It is never created from one of this integration's own entities, and the
+      config flow refuses one as `power_sensor`.
+    Unavailable whenever the meter is unavailable, missing or non-numeric.
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Power (mirror)"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_icon = "mdi:flash"
+
+    def __init__(
+        self,
+        hass,
+        entry_id: str,
+        name: str | None,
+        source_entity_id: str,
+        device_identifiers,
+        device_has_name: bool = False,
+    ) -> None:
+        """Initialise the mirror."""
+        self.hass = hass
+        self._entry_id = entry_id
+        self._source = source_entity_id
+        self._device_identifiers = device_identifiers
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_power_mirror"
+        self._attr_native_value = None
+        self._attr_native_unit_of_measurement = None
+        self._attr_available = False
+        self._attr_extra_state_attributes = {"mirror_of": source_entity_id}
+        # Spell the name out unless the device can supply one. See
+        # async_resolve_heater_device.
+        if name and not device_has_name:
+            self._attr_name = f"{name} Power (mirror)"
+            self._attr_has_entity_name = False
+
+    @property
+    def device_info(self):
+        """Return device information for the device registry."""
+        if self._device_identifiers:
+            return {"identifiers": self._device_identifiers}
+        return {"identifiers": {(DOMAIN, self._entry_id)}}
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the meter."""
+        await super().async_added_to_hass()
+        self._mirror(self.hass.states.get(self._source))
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._source], self._async_source_changed
+            )
+        )
+
+    @callback
+    def _async_source_changed(self, event) -> None:
+        self._mirror(event.data.get("new_state"))
+        self.async_write_ha_state()
+
+    def _mirror(self, state) -> None:
+        """Copy the meter's reading and unit; unavailable on any doubt."""
+        # Belt and braces, not covered: those two strings also fail float()
+        # below, with the same result.
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            self._attr_available = False
+            self._attr_native_value = None
+            return
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            self._attr_available = False
+            self._attr_native_value = None
+            return
+        self._attr_available = True
+        self._attr_native_value = value
+        self._attr_native_unit_of_measurement = state.attributes.get(
+            "unit_of_measurement"
+        )

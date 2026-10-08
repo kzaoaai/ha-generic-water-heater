@@ -148,6 +148,17 @@ of the eco condition must make `_eco_gated` false.** Renaming or removing either
 is a breaking change (bump major); publishing `""` instead of `None` for an unset meter would
 break it too.
 
+### Power (mirror) is a copy and must never be counted
+
+`ElementPowerSensor` ("Power (mirror)") copies the configured meter onto the heater's device for
+the UI. Its entity id ends `_power_mirror`, never `_power`, so a template summing `..._power`
+sensors cannot pick it up. It has
+**no `state_class`** on purpose — the meter carries statistics and Energy-dashboard duty, and a
+second statistics-bearing copy would double count. It names its source in `mirror_of`, is never
+created from one of this integration's own entities, and the config flow refuses a mirror as
+`power_sensor` (the selector cannot filter by platform). Consumers read the meter through the
+`power_sensor` attribute, never the mirror.
+
 ### A config-entry reload does not re-import module code
 
 Only a restart loads changed Python. Stale traceback line numbers are the tell. When a change is
@@ -220,7 +231,7 @@ options form.
 | `water_heater.py` | the entity, the control loop, Smart Eco, disinfection, load-shed services |
 | `fleet.py` | switch-on staggering; pure logic, imports nothing from Home Assistant |
 | `config_flow.py` | sectioned config/options forms, flat storage |
-| `sensor.py` | Smart Eco state, legionella risk, max-temp history, Disinfection Due In, Disinfection Hold Progress |
+| `sensor.py` | Smart Eco state, legionella risk, max-temp history, Disinfection Due In, Disinfection Hold Progress, Power (mirror) |
 | `temperature_filter.py` | single-sample spike rejection; pure logic, no Home Assistant imports |
 | `temperature_tracking.py` | the HA subscription wrapper every temperature consumer uses |
 | `select.py` | Smart Eco Mode and Legionella Disinfection selects |

@@ -5,6 +5,7 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 import homeassistant.helpers.config_validation as cv
 from homeassistant.data_entry_flow import section
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import selector
 
 from . import (
@@ -190,6 +191,24 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
     )
 
 
+def _power_sensor_errors(hass, flat: dict) -> dict:
+    """Refuse a power sensor that this integration created itself.
+
+    The heater's own "Power (mirror)" sensor is a MIRROR of the meter named here
+    (sensor.py, ElementPowerSensor). Naming a mirror as the meter would make it
+    mirror itself - or another heater's mirror - and would publish a copy as the
+    `power_sensor` contract instead of the meter. The selector cannot filter by
+    platform, so it is checked on submit.
+    """
+    entity_id = (flat.get(CONF_POWER_SENSOR) or "").strip()
+    if not entity_id:
+        return {}
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is not None and entry.platform == DOMAIN:
+        return {"base": "power_sensor_is_mirror"}
+    return {}
+
+
 def _apply_cleared_and_defaults(user_input: dict) -> dict:
     """Flatten, then persist cleared optional fields as empty rather than absent.
 
@@ -227,7 +246,12 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             flat = _apply_cleared_and_defaults(user_input)
-            return self.async_create_entry(title=flat[CONF_NAME], data=flat)
+            errors = _power_sensor_errors(self.hass, flat)
+            if not errors:
+                return self.async_create_entry(title=flat[CONF_NAME], data=flat)
+            return self.async_show_form(
+                step_id="user", data_schema=_build_data_schema(flat), errors=errors
+            )
 
         return self.async_show_form(step_id="user", data_schema=_build_data_schema(), errors=errors)
 
@@ -237,11 +261,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """Manage the integration options."""
-        if user_input is not None:
-            return self.async_create_entry(
-                title="", data=_apply_cleared_and_defaults(user_input)
-            )
-
         current = {**self.config_entry.data, **self.config_entry.options}
+        if user_input is not None:
+            flat = _apply_cleared_and_defaults(user_input)
+            errors = _power_sensor_errors(self.hass, flat)
+            if not errors:
+                return self.async_create_entry(title="", data=flat)
+            return self.async_show_form(
+                step_id="init",
+                data_schema=_build_data_schema({**current, **flat}),
+                errors=errors,
+            )
 
         return self.async_show_form(step_id="init", data_schema=_build_data_schema(current))

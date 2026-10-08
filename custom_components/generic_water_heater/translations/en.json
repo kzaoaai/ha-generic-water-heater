@@ -99,6 +99,9 @@
           }
         }
       }
+    },
+    "error": {
+      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself."
     }
   },
   "options": {
@@ -201,6 +204,9 @@
           }
         }
       }
+    },
+    "error": {
+      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself."
     }
   }
 }
