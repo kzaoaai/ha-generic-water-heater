@@ -77,6 +77,16 @@
               "water_in_use_entity": "A whole-house 'water is flowing' entity. Optional. It corroborates the milder falls that temperature alone cannot settle — it never gates detection, and a steep fall is reported without it."
             }
           },
+          "metering": {
+            "name": "Metering",
+            "description": "The meter on this heater's circuit, if it has one. Not used for control.",
+            "data": {
+              "power_sensor": "Power sensor (optional)"
+            },
+            "data_description": {
+              "power_sensor": "A sensor measuring what this element draws. Published as the heater's power_sensor attribute, so other integrations (a battery runtime estimate, for instance) can follow the heater's live draw without being configured with the meter themselves."
+            }
+          },
           "advanced": {
             "name": "Advanced",
             "description": "Diagnostics.",
@@ -167,6 +177,16 @@
             "data_description": {
               "enable_hot_water_in_use": "The detector works on this tank's temperature alone; the entity below is optional and only makes it more sensitive.",
               "water_in_use_entity": "A whole-house 'water is flowing' entity. Optional. It corroborates the milder falls that temperature alone cannot settle — it never gates detection, and a steep fall is reported without it."
+            }
+          },
+          "metering": {
+            "name": "Metering",
+            "description": "The meter on this heater's circuit, if it has one. Not used for control.",
+            "data": {
+              "power_sensor": "Power sensor (optional)"
+            },
+            "data_description": {
+              "power_sensor": "A sensor measuring what this element draws. Published as the heater's power_sensor attribute, so other integrations (a battery runtime estimate, for instance) can follow the heater's live draw without being configured with the meter themselves."
             }
           },
           "advanced": {

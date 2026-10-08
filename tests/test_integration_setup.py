@@ -517,3 +517,24 @@ async def test_a_deferred_sibling_still_gets_its_turn_after_the_window(hass, wor
         "the deferred sibling never got its turn"
     )
     assert deferred._fleet_hold_reason is None
+
+
+@pytest.mark.parametrize(
+    ("configured", "published"),
+    [("sensor.element_power", "sensor.element_power"), ("", None), (None, None)],
+)
+async def test_the_power_sensor_is_published_on_the_heater(
+    hass, world, configured, published
+):
+    """The attribute is how another integration finds this element's live draw,
+    from the heater rather than from its own config - so a meter swap is edited
+    here once. Unset and cleared both publish None, never ""."""
+    extra = {} if configured is None else {"power_sensor": configured}
+    entry = build_entry("Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, **extra)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("water_heater.upstairs")
+    assert state is not None
+    assert state.attributes["power_sensor"] == published

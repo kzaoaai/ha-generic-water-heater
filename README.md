@@ -92,6 +92,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit. Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false. |
 
 ## Fleet Load Coordination
 

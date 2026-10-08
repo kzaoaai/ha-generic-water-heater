@@ -22,6 +22,10 @@ CONF_HEATER = "heater_switch"
 # it is what creates the Hot Water In Use sensor; it is corroboration inside the
 # detector rather than a gate, because it is whole-house and this tank is not.
 CONF_WATER_IN_USE_ENTITY = "water_in_use_entity"
+# What the element draws, as measured by a meter on its circuit. Not used for
+# control here; published as the `power_sensor` attribute so another integration
+# can find the heater's live draw from the heater, not from its own config.
+CONF_POWER_SENSOR = "power_sensor"
 # Creating the Hot Water In Use sensor hangs on this boolean, NOT on the entity
 # above. The primary signal is the tank's own temperature fall, which needs no
 # external help; the entity only unlocks the milder falls that need

@@ -52,6 +52,7 @@ from . import (
     CONF_ECO_TEMPLATE,
     CONF_FLEET_STAGGER_SECONDS,
     CONF_HEATER,
+    CONF_POWER_SENSOR,
     CONF_HOT_TOLERANCE,
     CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
     CONF_MIN_OFF_DURATION,
@@ -124,6 +125,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     debug_logging = data.get(CONF_DEBUG_LOGGING, False)
     manual_off_resume_hours = data.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
     fleet_stagger_seconds = data.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
+    power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
     unit = hass.config.units.temperature_unit
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     if runtime.get("smart_eco_mode") is None:
@@ -185,6 +187,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         config_entry_id=entry.entry_id,
         device_identifiers=device_identifiers,
         fleet_stagger_seconds=fleet_stagger_seconds,
+        power_sensor=power_sensor,
     )
     runtime["water_heater_entity"] = entity
     async_add_entities([entity])
@@ -228,9 +231,12 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         config_entry_id=None,
         device_identifiers=None,
         fleet_stagger_seconds=DEFAULT_STAGGER_SECONDS,
+        power_sensor=None,
     ):
         """Initialize the water_heater device."""
         self.hass = hass
+        # Published, never read for control (CONF_POWER_SENSOR).
+        self._power_sensor = power_sensor
         self._attr_name = name
         self.heater_entity_id = heater_entity_id
         self.sensor_entity_id = sensor_entity_id
@@ -359,7 +365,34 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "smart_eco_off_until_target_since": (
                 self._smart_eco_off_until_target_since
             ),
+            # The meter on this element's circuit, or None. A contract with
+            # consumers outside this integration (a battery runtime estimate
+            # follows the heater's live draw through it): renaming it is a
+            # breaking change.
+            "power_sensor": self._power_sensor,
+            # True when this heat exists only because the eco condition allows
+            # it, i.e. it would stop if the condition went false: Smart Eco
+            # enforcing (template set, an enforcing mode, not paused), the
+            # condition currently TRUE and not inside the startup grace (where a
+            # false condition neither parks nor restores), plain electric
+            # operation, no disinfection running, not shed. Performance, a
+            # disinfection cycle, Smart Eco off or paused all heat regardless.
+            # Same contract as power_sensor: a consumer leaves this heater's
+            # draw out of what a battery must carry when the gating supply
+            # leaves, so a false True hides real load.
+            "eco_gated": self._eco_gated(),
         }
+
+    def _eco_gated(self) -> bool:
+        """Whether the current heat depends on the eco condition (see attribute)."""
+        return (
+            self._is_smart_eco_enforcing()
+            and self._eco_condition_met
+            and not self._startup_grace_active
+            and self._current_operation == STATE_ELECTRIC
+            and not self._disinfecting
+            and not self._load_shed
+        )
 
     @property
     def hvac_action(self):

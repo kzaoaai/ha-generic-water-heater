@@ -20,6 +20,7 @@ from custom_components.generic_water_heater import (
     CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_HEATER,
+    CONF_POWER_SENSOR,
     CONF_SENSOR,
     CONF_WATER_IN_USE_ENTITY,
 )
@@ -93,6 +94,7 @@ def test_cleared_optional_fields_are_persisted_as_empty():
 
     assert flat[CONF_ECO_TEMPLATE] == ""
     assert flat[CONF_WATER_IN_USE_ENTITY] == ""
+    assert flat[CONF_POWER_SENSOR] == ""
     assert flat[CONF_ENABLE_HOT_WATER_IN_USE] is False
     assert flat[CONF_ENABLE_LEGIONELLA_SENSOR] is False
 
@@ -160,3 +162,17 @@ def test_the_water_in_use_label_no_longer_claims_to_create_the_sensor():
     """It used to gate creation. It does not any more, and the label said so."""
     text = TRANSLATIONS.read_text()
     assert "creates a Hot Water In Use sensor" not in text
+
+
+def test_the_power_sensor_is_offered_with_its_current_value_and_no_default():
+    """An entity selector rejects "", so like the water-in-use entity it carries
+    only a suggested value; a default would make it impossible to clear."""
+    schema = _build_data_schema({CONF_POWER_SENSOR: "sensor.element_power"})
+    for key in schema.schema:
+        if str(key.schema) == "metering":
+            inner = schema.schema[key].schema.schema
+            (field,) = [k for k in inner if str(k.schema) == CONF_POWER_SENSOR]
+            assert field.description == {"suggested_value": "sensor.element_power"}
+            assert field.default is vol.UNDEFINED
+            return
+    pytest.fail("no metering section")

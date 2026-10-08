@@ -24,6 +24,7 @@ from . import (
     CONF_SENSOR,
     CONF_TEMP_MAX,
     CONF_WATER_IN_USE_ENTITY,
+    CONF_POWER_SENSOR,
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
     DOMAIN,
@@ -69,6 +70,7 @@ SECTIONS: dict[str, tuple[str, ...]] = {
         CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
     ),
     "hot_water_in_use": (CONF_ENABLE_HOT_WATER_IN_USE, CONF_WATER_IN_USE_ENTITY),
+    "metering": (CONF_POWER_SENSOR,),
     "advanced": (CONF_DEBUG_LOGGING,),
 }
 
@@ -168,6 +170,16 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 ): selector({"entity": {"domain": ["binary_sensor", "input_boolean", "switch"]}}),
             }),
 
+            # Like the water-in-use entity: no schema default (an entity
+            # selector rejects ""), only a suggested value, and cleared to ""
+            # by _apply_cleared_and_defaults.
+            vol.Required("metering"): _section("metering", {
+                vol.Optional(
+                    CONF_POWER_SENSOR,
+                    description={"suggested_value": current.get(CONF_POWER_SENSOR) or None},
+                ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
+            }),
+
             vol.Required("advanced"): _section("advanced", {
                 vol.Optional(
                     CONF_DEBUG_LOGGING,
@@ -188,6 +200,7 @@ def _apply_cleared_and_defaults(user_input: dict) -> dict:
     flat = flatten_sections(user_input)
     flat.setdefault(CONF_ECO_TEMPLATE, "")
     flat.setdefault(CONF_WATER_IN_USE_ENTITY, "")
+    flat.setdefault(CONF_POWER_SENSOR, "")
     flat.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
     flat.setdefault(CONF_DEBUG_LOGGING, False)
     flat.setdefault(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)

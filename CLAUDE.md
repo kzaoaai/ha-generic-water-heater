@@ -136,6 +136,18 @@ stored state; only the select labels changed. So completion is "a hold completed
 (`_cycle_completed_since_start`); reading "risk is Low" would end a cycle started on a Low tank the
 moment it began.
 
+### `power_sensor` and `eco_gated` are a contract with another integration
+
+`power_sensor` is the configured meter on the element's circuit (or `None`), published only,
+never read for control. `eco_gated` is `True` only while the heat depends on the Smart Eco
+condition — it would stop if the condition went false (`_eco_gated`: policy enforcing, the
+condition true and the startup grace over, `electric`, no disinfection, not shed). A battery runtime estimate in another integration
+leaves an `eco_gated` heater's metered draw out of what the battery must carry when the
+gating supply leaves. So a false `True` hides real load: **any new way of heating regardless
+of the eco condition must make `_eco_gated` false.** Renaming or removing either attribute
+is a breaking change (bump major); publishing `""` instead of `None` for an unset meter would
+break it too.
+
 ### A config-entry reload does not re-import module code
 
 Only a restart loads changed Python. Stale traceback line numbers are the tell. When a change is
