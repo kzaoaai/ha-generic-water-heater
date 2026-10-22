@@ -157,9 +157,41 @@ condition — it would stop if the condition went false (`_eco_gated`: policy en
 condition true and the startup grace over, `electric`, no disinfection, not shed). A battery runtime estimate in another integration
 leaves an `eco_gated` heater's metered draw out of what the battery must carry when the
 gating supply leaves. So a false `True` hides real load: **any new way of heating regardless
-of the eco condition must make `_eco_gated` false.** Renaming or removing either attribute
+of the eco condition must make `_eco_gated` false.** Boost-only heat is the one addition on the
+other side: with the tank past its normal target plus hot tolerance, the boost's heat stops when
+surplus leaves, which is when a battery would have to carry it, so it reads true even with the
+policy off or paused. Inside the normal hysteresis band it reads false, because the element would
+stay on regardless. Renaming or removing either attribute
 is a breaking change (bump major); publishing `""` instead of `None` for an unset meter would
 break it too.
+
+### The eco condition has named inputs; the template is only an extra term
+
+Since 4.5.0 the eco condition is: the surplus entity active, OR the utility entity active and
+the **Eco: Use Utility** switch on, OR the template true. Each entity matches its own active
+state, ignoring case (an enum power-source sensor reads `Utility`, not `on`). The template stays
+as an optional OR term on purpose: an entry that is never reconfigured keeps working, and removing
+it would drop that entry to "no eco condition", where Smart Eco is inert and the tank heats on any
+source, including a battery overnight (`_is_smart_eco_enforcing` needs `_has_eco_condition()`).
+Do not reuse the legacy `eco_entity` / `eco_value` keys: v4 migration turns those into a template.
+
+The two switches are **views** onto the water heater, which owns and restores their state from
+its own `eco_use_utility` / `surplus_boost_enabled` attributes. They are not RestoreEntity: two
+entities restoring one fact is the setup-order race 4.4.1 fixed for the disinfection policy.
+Toggling them is a policy choice, never a manual override.
+
+### The surplus boost only ever adds heat, and only on surplus
+
+While surplus is active and **Boost: Use PV Excess** is on, a tank in `electric` aims at the boost
+target (`_effective_target_temperature`); the published target stays the person's. Off, performance,
+a shed and a disinfection cycle all exclude it, and a boost target at or below the normal target
+does nothing. Felicity-style surplus detectors judge surplus from the battery, so they see the
+heater's own draw: on 2026-10-18 two heaters cycled six times in an hour, 2-3 minutes each, because
+their draw exceeded late-afternoon PV. Holding the element through that would drain the battery, so
+there is no hold: a boost whose element was on when surplus left, within `SURPLUS_BOOST_SHORT_RUN`
+(10 min) of it arriving, is locked out for `SURPLUS_BOOST_LOCKOUT` (30 min). The check runs at the
+falling edge, before the new state is read, because a slow relay reports its ON after the control
+pass that commanded it. Normal heating is never locked out.
 
 ### Power (mirror) is a copy and must never be counted
 
@@ -276,6 +308,7 @@ options form.
 | `temperature_filter.py` | single-sample spike rejection; pure logic, no Home Assistant imports |
 | `temperature_tracking.py` | the HA subscription wrapper every temperature consumer uses |
 | `select.py` | Smart Eco Mode and Legionella Disinfection selects |
+| `switch.py` | Eco: Use Utility and Boost: Use PV Excess, views onto the water heater |
 | `binary_sensor.py` | Hot Water In Use draw detector |
 
 `fleet.py` is deliberately Home-Assistant-free and driven by an injected `now`, so its decisions can

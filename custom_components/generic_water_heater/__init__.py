@@ -4,6 +4,7 @@ import logging
 from homeassistant.components.binary_sensor import DOMAIN as BINARY_SENSOR_DOMAIN
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
@@ -16,7 +17,13 @@ from .fleet import FLEET_KEY, HeaterFleet
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "generic_water_heater"
-PLATFORMS = [WATER_HEATER_DOMAIN, SENSOR_DOMAIN, SELECT_DOMAIN, BINARY_SENSOR_DOMAIN]
+PLATFORMS = [
+    WATER_HEATER_DOMAIN,
+    SENSOR_DOMAIN,
+    SELECT_DOMAIN,
+    BINARY_SENSOR_DOMAIN,
+    SWITCH_DOMAIN,
+]
 
 CONF_HEATER = "heater_switch"
 # Optional external "water is flowing somewhere in the house" entity. Configuring
@@ -43,6 +50,21 @@ CONF_TEMP_MAX = "max_temp"
 CONF_MIN_ON_DURATION = "min_on_duration"
 CONF_MIN_OFF_DURATION = "min_off_duration"
 CONF_ECO_TEMPLATE = "eco_mode_template_condition"
+# The eco condition's named inputs. Heating is allowed while the surplus
+# entity is active, OR the utility entity is active and the "Eco: Use Utility"
+# switch is on, OR the template (now an optional extra term) is true. Each
+# entity counts as active when its state equals its configured active state,
+# compared case-insensitively, so an enum sensor ("Utility") works as well as a
+# binary one. Naming the inputs is what lets the heater know WHY it may heat,
+# which the surplus boost needs and a template cannot tell it.
+CONF_SURPLUS_ENTITY = "surplus_entity"
+CONF_SURPLUS_STATE = "surplus_state"
+CONF_UTILITY_ENTITY = "utility_entity"
+CONF_UTILITY_STATE = "utility_state"
+DEFAULT_ACTIVE_STATE = "on"
+# Heat toward this target, instead of the normal one, while surplus is active
+# and the "Boost: Use PV Excess" switch is on. Unset = no boost.
+CONF_SURPLUS_BOOST_TARGET = "surplus_boost_target_temperature"
 CONF_FLEET_STAGGER_SECONDS = "fleet_stagger_seconds"
 CONF_DEBUG_LOGGING = "enable_debug_logging"
 CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
@@ -207,6 +229,22 @@ def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:
         fleet = HeaterFleet()
         domain_data[FLEET_KEY] = fleet
     return fleet
+
+
+def eco_condition_configured(config: dict) -> bool:
+    """Whether the entry has any eco condition: an entity input or the template.
+
+    Smart Eco, its select and its state sensor exist only when this is true.
+    """
+    return any(
+        (config.get(key) or "").strip()
+        for key in (CONF_ECO_TEMPLATE, CONF_SURPLUS_ENTITY, CONF_UTILITY_ENTITY)
+    )
+
+
+def eco_switches_signal(entry_id: str) -> str:
+    """Return dispatcher signal name for the eco/boost switch states."""
+    return f"{DOMAIN}_eco_switches_{entry_id}"
 
 
 def smart_eco_signal(entry_id: str) -> str:

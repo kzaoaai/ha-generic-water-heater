@@ -60,10 +60,16 @@ from . import (
     CONF_MIN_OFF_DURATION,
     CONF_MIN_ON_DURATION,
     CONF_SENSOR,
+    CONF_SURPLUS_BOOST_TARGET,
+    CONF_SURPLUS_ENTITY,
+    CONF_SURPLUS_STATE,
     CONF_TARGET_TEMP,
     CONF_TEMP_MAX,
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
+    CONF_UTILITY_ENTITY,
+    CONF_UTILITY_STATE,
+    DEFAULT_ACTIVE_STATE,
     DOMAIN,
     SERVICE_RELEASE,
     SERVICE_SHED,
@@ -74,6 +80,8 @@ from . import (
     SMART_ECO_MODE_UNTIL_MANUAL,
     SMART_ECO_MODES,
     async_get_fleet,
+    eco_condition_configured,
+    eco_switches_signal,
     smart_eco_signal,
     smart_eco_state_signal,
     legionella_signal,
@@ -88,6 +96,12 @@ from . import (
     LEGIONELLA_ONE_SHOT_MODES,
 )
 from .fleet import DEFAULT_STAGGER_SECONDS
+from .switch import (
+    DEFAULT_BOOST_ENABLED,
+    DEFAULT_USE_UTILITY,
+    RUNTIME_BOOST_ENABLED,
+    RUNTIME_USE_UTILITY,
+)
 from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,6 +118,16 @@ STARTUP_GRACE = timedelta(minutes=2)
 # reported an OFF 11 s after it was sent on 2026-10-02; this leaves headroom
 # without letting a stale entry swallow a person's flip much later.
 OWN_ECHO_WINDOW = timedelta(seconds=30)
+
+# The surplus boost's anti-cycling bound. A surplus detector that judges
+# "surplus" from the battery sees the heater's own draw: when the element needs
+# more than the spare PV, the pack discharges, surplus clears a few minutes
+# later, the element stops, the pack refills and surplus returns. Seen
+# 2026-10-18 16:16-17:24 as six on/off cycles of 2-3 minutes. So a boost that
+# heated and lost its surplus within SHORT_RUN is not tried again for LOCKOUT.
+# Heating to the normal target is never locked out.
+SURPLUS_BOOST_SHORT_RUN = timedelta(minutes=10)
+SURPLUS_BOOST_LOCKOUT = timedelta(minutes=30)
 
 DEFAULT_NAME = "Generic Water Heater"
 
@@ -128,15 +152,24 @@ async def async_setup_entry(hass, entry, async_add_entities):
     manual_off_resume_hours = data.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
     fleet_stagger_seconds = data.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
     power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
+    surplus_entity = (data.get(CONF_SURPLUS_ENTITY) or "").strip() or None
+    utility_entity = (data.get(CONF_UTILITY_ENTITY) or "").strip() or None
+    surplus_boost_target = data.get(CONF_SURPLUS_BOOST_TARGET)
+    if surplus_boost_target in ("",):
+        surplus_boost_target = None
     unit = hass.config.units.temperature_unit
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     if runtime.get("smart_eco_mode") is None:
-        # Smart Eco defaults to auto-resume policy when a template exists; otherwise Off.
-        runtime["smart_eco_mode"] = SMART_ECO_MODE_AUTO_RESUME if eco_template is not None else SMART_ECO_MODE_OFF
+        # Smart Eco defaults to auto-resume policy when an eco condition exists; otherwise Off.
+        runtime["smart_eco_mode"] = (
+            SMART_ECO_MODE_AUTO_RESUME if eco_condition_configured(data) else SMART_ECO_MODE_OFF
+        )
     runtime.setdefault("smart_eco_pause_reason", None)
     runtime.setdefault("smart_eco_resume_at", None)
     runtime.setdefault("smart_eco_last_heating_mode", STATE_ELECTRIC)
     runtime.setdefault("smart_eco_state", "Off")
+    runtime.setdefault(RUNTIME_USE_UTILITY, DEFAULT_USE_UTILITY)
+    runtime.setdefault(RUNTIME_BOOST_ENABLED, DEFAULT_BOOST_ENABLED)
 
     registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
@@ -194,6 +227,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
         device_identifiers=device_identifiers,
         fleet_stagger_seconds=fleet_stagger_seconds,
         power_sensor=power_sensor,
+        surplus_entity=surplus_entity,
+        surplus_state=data.get(CONF_SURPLUS_STATE) or DEFAULT_ACTIVE_STATE,
+        utility_entity=utility_entity,
+        utility_state=data.get(CONF_UTILITY_STATE) or DEFAULT_ACTIVE_STATE,
+        surplus_boost_target=(
+            float(surplus_boost_target) if surplus_boost_target is not None else None
+        ),
     )
     runtime["water_heater_entity"] = entity
     async_add_entities([entity])
@@ -269,6 +309,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         device_identifiers=None,
         fleet_stagger_seconds=DEFAULT_STAGGER_SECONDS,
         power_sensor=None,
+        surplus_entity=None,
+        surplus_state=DEFAULT_ACTIVE_STATE,
+        utility_entity=None,
+        utility_state=DEFAULT_ACTIVE_STATE,
+        surplus_boost_target=None,
     ):
         """Initialize the water_heater device."""
         self.hass = hass
@@ -294,6 +339,20 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             min_off_duration if min_off_duration is not None else timedelta(seconds=120)
         )
         self._eco_template = Template(eco_template, hass) if eco_template else None
+        # The eco condition's inputs (CONF_SURPLUS_ENTITY): each part is kept,
+        # so the heater knows WHY it may heat, not only that it may.
+        self._surplus_entity = surplus_entity
+        self._surplus_state = surplus_state
+        self._utility_entity = utility_entity
+        self._utility_state = utility_state
+        self._eco_template_met = False
+        self._surplus_active = False
+        self._utility_active = False
+        self._surplus_boost_target = surplus_boost_target
+        # When the current surplus window opened, for the short-boost lockout.
+        self._surplus_window_start: datetime | None = None
+        self._surplus_boost_locked_until: datetime | None = None
+        self._surplus_boost_lockout_timer = None
         self._runtime = runtime
         self._smart_eco_mode = runtime.get("smart_eco_mode", SMART_ECO_MODE_OFF)
         self._smart_eco_pause_reason = runtime.get("smart_eco_pause_reason")
@@ -418,11 +477,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # draw out of what a battery must carry when the gating supply
             # leaves, so a false True hides real load.
             "eco_gated": self._eco_gated(),
+            # The two eco switches, restored from here (switch.py).
+            RUNTIME_USE_UTILITY: self._use_utility(),
+            RUNTIME_BOOST_ENABLED: self._surplus_boost_enabled(),
+            "surplus_boost_active": self._surplus_boost_active(),
+            "surplus_boost_target": self._surplus_boost_target,
+            "surplus_boost_locked_until": (
+                self._surplus_boost_locked_until.isoformat()
+                if self._surplus_boost_locked()
+                else None
+            ),
         }
 
     def _eco_gated(self) -> bool:
         """Whether the current heat depends on the eco condition (see attribute)."""
-        return (
+        policy_gated = (
             self._is_smart_eco_enforcing()
             and self._eco_condition_met
             and not self._startup_grace_active
@@ -430,6 +499,17 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             and not self._disinfecting
             and not self._load_shed
         )
+        # Heat that exists only because of the boost: the tank is past where
+        # its normal target would stop it, so it stops when surplus leaves -
+        # which is when the pack would have to carry it. That holds even with
+        # the policy off or paused, which is the only case this adds.
+        boost_gated = (
+            self._surplus_boost_active()
+            and self._current_temperature is not None
+            and self._current_temperature
+            >= self._target_temperature + self._hot_tolerance
+        )
+        return policy_gated or boost_gated
 
     @property
     def hvac_action(self):
@@ -524,7 +604,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
         )
 
-        if self._eco_template is not None and old_mode != operation_mode and is_heating_boundary_change:
+        if self._has_eco_condition() and old_mode != operation_mode and is_heating_boundary_change:
             if self._smart_eco_mode == SMART_ECO_MODE_AUTO_RESUME:
                 await self._async_pause_smart_eco_for_manual_override(
                     "manual_off" if operation_mode == STATE_OFF else "manual_on",
@@ -542,7 +622,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if (
             operation_mode == STATE_OFF
             and self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON
-            and self._eco_template is not None
+            and self._has_eco_condition()
         ):
             self._debug_log("ignoring manual OFF operation while Smart Eco mode is Always ON")
             await self._async_control_heating()
@@ -556,7 +636,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_turn_on(self, **kwargs):
         """Turn the entity on."""
-        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._eco_template is not None:
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._has_eco_condition():
             self._debug_log("ignoring manual turn_on while Smart Eco mode is Always ON")
             await self._async_control_heating()
             return
@@ -567,7 +647,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
     async def async_turn_off(self, **kwargs):
         """Turn the entity off."""
-        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._eco_template is not None:
+        if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._has_eco_condition():
             self._debug_log("ignoring manual turn_off while Smart Eco mode is Always ON")
             await self._async_control_heating()
             return
@@ -1034,6 +1114,18 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self.async_on_remove(info.async_remove)
             info.async_refresh()
 
+        eco_entities = [
+            entity_id
+            for entity_id in (self._surplus_entity, self._utility_entity)
+            if entity_id is not None
+        ]
+        if eco_entities:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, eco_entities, self._async_eco_entity_changed
+                )
+            )
+
         old_state = await self.async_get_last_state()
         if old_state is not None:
             if old_state.attributes.get(ATTR_TEMPERATURE) is not None:
@@ -1061,6 +1153,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if isinstance(restored_pause_reason, str):
                 self._smart_eco_pause_reason = restored_pause_reason
                 self._runtime["smart_eco_pause_reason"] = restored_pause_reason
+
+            # The two eco switches are views onto these (switch.py): restored
+            # here only, so nothing else can restore them in another order.
+            for key in (RUNTIME_USE_UTILITY, RUNTIME_BOOST_ENABLED):
+                restored_switch = old_state.attributes.get(key)
+                if isinstance(restored_switch, bool):
+                    self._runtime[key] = restored_switch
 
             restored_resume_at = old_state.attributes.get("smart_eco_resume_at")
             if isinstance(restored_resume_at, str):
@@ -1193,6 +1292,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
 
         self._async_refresh_eco_condition()
+        async_dispatcher_send(self.hass, eco_switches_signal(self._entry_id))
         self._update_smart_eco_state()
         # Evaluate first: a cycle that should be running must own the mode
         # before the control pass acts on it, or the pass commands the tank on
@@ -1217,9 +1317,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._cooldown_timer,
             self._smart_eco_resume_timer,
             self._smart_eco_countdown_timer,
+            self._surplus_boost_lockout_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
+        self._surplus_boost_lockout_timer = None
         self._cooldown_timer = None
         self._smart_eco_resume_timer = None
         self._smart_eco_countdown_timer = None
@@ -1278,29 +1380,82 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         await self._async_control_heating()
 
     @callback
-    def _async_refresh_eco_condition(self, result=None):
-        """Refresh the current eco condition state."""
-        previous = self._eco_condition_met
-        if self._eco_template is None:
-            self._eco_condition_met = False
-            if previous != self._eco_condition_met:
-                self._debug_log("eco condition changed: %s -> %s", previous, self._eco_condition_met)
-            return
+    def _has_eco_condition(self) -> bool:
+        """Whether any eco input is configured (eco_condition_configured)."""
+        return (
+            self._eco_template is not None
+            or self._surplus_entity is not None
+            or self._utility_entity is not None
+        )
 
+    def _async_refresh_eco_condition(self, result=None):
+        """Re-read every eco input: render the template, read the entities."""
+        self._eco_template_met = self._eco_template_result(result)
+        self._refresh_eco_entities()
+        self._recompute_eco_condition()
+
+    def _eco_template_result(self, result=None) -> bool:
+        """The template term: False when there is none or it cannot render."""
+        if self._eco_template is None:
+            return False
         if result is None:
             try:
                 result = self._eco_template.async_render(parse_result=False)
             except TemplateError as err:
                 _LOGGER.warning("%s: eco template render failed: %s", self.name, err)
-                self._eco_condition_met = False
-                if previous != self._eco_condition_met:
-                    self._debug_log("eco condition changed: %s -> %s", previous, self._eco_condition_met)
-                return
+                return False
+        met = result_as_boolean(result)
+        self._debug_log("eco template evaluated: template_result=%s, met=%s", result, met)
+        return met
 
-        self._eco_condition_met = result_as_boolean(result)
+    def _entity_active(self, entity_id: str | None, active_state: str) -> bool:
+        """Whether an eco input entity is in its active state.
+
+        Missing, unavailable or unknown reads inactive: an input that cannot be
+        read does not allow heating. At startup the grace covers the gap.
+        """
+        if entity_id is None:
+            return False
+        state = self.hass.states.get(entity_id)
+        # The unavailable/unknown check is belt and braces, not covered: it
+        # only matters if someone made one of those the active state.
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return False
+        return state.state.strip().casefold() == (
+            (active_state or DEFAULT_ACTIVE_STATE).strip().casefold()
+        )
+
+    def _refresh_eco_entities(self) -> None:
+        """Read the surplus and utility entities, noting surplus edges."""
+        # Asked BEFORE the new reading, while the boost is still active: is
+        # its element drawing at the moment the surplus leaves? That draw is
+        # what clears a battery-judged surplus. Read here rather than when
+        # control commanded it, because a slow relay reports its ON later.
+        boost_was_heating = self._surplus_boost_heating_now()
+        was_surplus = self._surplus_active
+        self._surplus_active = self._entity_active(self._surplus_entity, self._surplus_state)
+        self._utility_active = self._entity_active(self._utility_entity, self._utility_state)
+        if self._surplus_active != was_surplus:
+            self._handle_surplus_edge(boost_was_heating)
+
+    def _recompute_eco_condition(self) -> None:
+        """Combine the terms: surplus, OR utility while it is used, OR template."""
+        previous = self._eco_condition_met
+        self._eco_condition_met = (
+            self._surplus_active
+            or (self._utility_active and self._use_utility())
+            or self._eco_template_met
+        )
         if previous != self._eco_condition_met:
-            self._debug_log("eco condition evaluated: template_result=%s, meets_condition=%s", result, self._eco_condition_met)
-            self._debug_log("eco condition changed: %s -> %s", previous, self._eco_condition_met)
+            self._debug_log(
+                "eco condition changed: %s -> %s (surplus=%s, utility=%s, use_utility=%s, template=%s)",
+                previous,
+                self._eco_condition_met,
+                self._surplus_active,
+                self._utility_active,
+                self._use_utility(),
+                self._eco_template_met,
+            )
 
     async def _async_eco_template_changed(
         self,
@@ -1313,18 +1468,140 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         if isinstance(result, TemplateError):
             _LOGGER.warning("%s: eco template update failed: %s", self.name, result)
-            self._eco_condition_met = False
+            self._eco_template_met = False
         else:
-            self._async_refresh_eco_condition(result)
+            self._eco_template_met = self._eco_template_result(result)
+        self._recompute_eco_condition()
+        await self._async_eco_inputs_changed(event)
 
+    async def _async_eco_entity_changed(self, event: Event[EventStateChangedData]) -> None:
+        """Handle a surplus or utility entity changing state."""
+        self._refresh_eco_entities()
+        self._recompute_eco_condition()
+        await self._async_eco_inputs_changed(event)
+
+    async def _async_eco_inputs_changed(self, event) -> None:
+        """Act on a changed eco input."""
         if event:
             self.async_set_context(event.context)
 
         self._update_smart_eco_state()
         self.async_write_ha_state()
 
-        if self._is_smart_eco_enforcing():
+        # The boost acts on surplus whether or not the policy is enforcing.
+        if self._is_smart_eco_enforcing() or self._surplus_boost_configured():
             await self._async_control_heating()
+
+    def _use_utility(self) -> bool:
+        """The "Eco: Use Utility" switch."""
+        return bool(self._runtime.get(RUNTIME_USE_UTILITY, DEFAULT_USE_UTILITY))
+
+    def _surplus_boost_enabled(self) -> bool:
+        """The "Boost: Use PV Excess" switch."""
+        return bool(self._runtime.get(RUNTIME_BOOST_ENABLED, DEFAULT_BOOST_ENABLED))
+
+    def _surplus_boost_configured(self) -> bool:
+        return self._surplus_entity is not None and self._surplus_boost_target is not None
+
+    def _surplus_boost_locked(self) -> bool:
+        return (
+            self._surplus_boost_locked_until is not None
+            and dt_util.utcnow() < self._surplus_boost_locked_until
+        )
+
+    def _surplus_boost_active(self) -> bool:
+        """Whether control is aiming at the boost target right now.
+
+        Only in plain electric: OFF is a person's (or the gate's) and must stay
+        reachable, PERFORMANCE already heats without a target, a shed outranks
+        everything, and a disinfection cycle runs its own course.
+        """
+        return (
+            self._surplus_boost_configured()
+            and self._surplus_boost_enabled()
+            and self._surplus_active
+            and self._target_temperature is not None
+            and self._surplus_boost_target > self._target_temperature
+            and self._current_operation == STATE_ELECTRIC
+            and not self._load_shed
+            # Belt and braces, not covered: a cycle runs in performance, and a
+            # person choosing electric ends it, so the electric check above
+            # already excludes it.
+            and not self._disinfecting
+            and not self._surplus_boost_locked()
+        )
+
+    def _effective_target_temperature(self):
+        """The target control aims at: the boost target while boosting.
+
+        The published target_temperature stays the person's own; the boost is
+        reported separately (surplus_boost_active / surplus_boost_target).
+        """
+        if self._surplus_boost_active():
+            return self._surplus_boost_target
+        return self._target_temperature
+
+    def _surplus_boost_heating_now(self) -> bool:
+        """Whether the boost is active and its element is on.
+
+        Deliberately coarse: it does not ask whether the tank was above its
+        normal target. Below it the eco gate heats on surplus anyway, so a
+        lockout changes nothing there. A boost that reached its target and
+        stopped before the surplus left reads False: it did not cause the
+        surplus to leave.
+        """
+        if not self._surplus_boost_active():
+            return False
+        heater = self.hass.states.get(self.heater_entity_id)
+        return heater is not None and heater.state == STATE_ON
+
+    def _handle_surplus_edge(self, boost_was_heating: bool) -> None:
+        """Open a surplus window, or close one and lock out a short boost."""
+        now = dt_util.utcnow()
+        if self._surplus_active:
+            self._surplus_window_start = now
+            return
+
+        started = self._surplus_window_start
+        self._surplus_window_start = None
+        if boost_was_heating and started is not None and now - started < SURPLUS_BOOST_SHORT_RUN:
+            self._surplus_boost_locked_until = now + SURPLUS_BOOST_LOCKOUT
+            if self._surplus_boost_lockout_timer is not None:
+                self._surplus_boost_lockout_timer()
+            self._surplus_boost_lockout_timer = async_call_later(
+                self.hass,
+                SURPLUS_BOOST_LOCKOUT.total_seconds(),
+                self._async_surplus_boost_lockout_ended,
+            )
+            self._debug_log(
+                "surplus boost: surplus lasted %ss with the element on; locked out until %s",
+                int((now - started).total_seconds()),
+                self._surplus_boost_locked_until.isoformat(),
+            )
+
+    async def _async_surplus_boost_lockout_ended(self, _now) -> None:
+        """Let the boost try again."""
+        self._surplus_boost_lockout_timer = None
+        self._surplus_boost_locked_until = None
+        self._debug_log("surplus boost: lockout ended")
+        await self._async_control_heating()
+
+    async def async_set_eco_use_utility(self, value: bool) -> None:
+        """Set the "Eco: Use Utility" switch. A policy choice, not a manual override."""
+        self._runtime[RUNTIME_USE_UTILITY] = bool(value)
+        await self._async_eco_switch_changed()
+
+    async def async_set_surplus_boost_enabled(self, value: bool) -> None:
+        """Set the "Boost: Use PV Excess" switch. A policy choice, not a manual override."""
+        self._runtime[RUNTIME_BOOST_ENABLED] = bool(value)
+        await self._async_eco_switch_changed()
+
+    async def _async_eco_switch_changed(self) -> None:
+        self._recompute_eco_condition()
+        async_dispatcher_send(self.hass, eco_switches_signal(self._entry_id))
+        self._update_smart_eco_state()
+        await self._async_control_heating()
+        self.async_write_ha_state()
 
     @callback
     def _async_switch_changed(self, event):
@@ -1555,8 +1832,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         if self._current_temperature is None or self._target_temperature is None:
             return False
 
+        # The boost target here is for consistency, not covered: it only moves
+        # the Smart Eco state label and the manual-on idle check.
         return self._current_temperature <= (
-            self._target_temperature - self._cold_tolerance
+            self._effective_target_temperature() - self._cold_tolerance
         )
 
     def _smart_eco_logical_heating_active(self) -> bool:
@@ -1597,7 +1876,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
     def _is_smart_eco_enforcing(self) -> bool:
         """Return whether Smart Eco policy is currently enforcing heater control."""
         return (
-            self._eco_template is not None
+            self._has_eco_condition()
             and self._smart_eco_mode in (SMART_ECO_MODE_UNTIL_MANUAL, SMART_ECO_MODE_AUTO_RESUME, SMART_ECO_MODE_ALWAYS_ON)
             and self._smart_eco_pause_reason is None
         )
@@ -1692,7 +1971,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # Reported ahead of every policy state: while shed, nothing else is
             # deciding whether this heater runs.
             state = "Shed by load balancer"
-        elif self._eco_template is None or self._smart_eco_mode == SMART_ECO_MODE_OFF:
+        elif not self._has_eco_condition() or self._smart_eco_mode == SMART_ECO_MODE_OFF:
             state = "Off"
         elif self._smart_eco_mode == SMART_ECO_MODE_OFF_UNTIL_TARGET:
             state = "Off until the tank reaches target"
@@ -1905,7 +2184,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         """Pause or stop Smart Eco according to current policy mode and override action."""
         if (
             self._smart_eco_mode in (SMART_ECO_MODE_OFF, SMART_ECO_MODE_OFF_UNTIL_TARGET)
-            or self._eco_template is None
+            or not self._has_eco_condition()
         ):
             # Nothing to pause: eco is already standing down. OFF_UNTIL_TARGET
             # additionally must not be converted into a timed pause, or it
@@ -2097,8 +2376,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         # Control heating based on tolerance
         # Logic: Turn ON if temp <= target - cold_tolerance. Turn OFF if temp >= target + hot_tolerance.
-        lower_threshold = self._target_temperature - self._cold_tolerance
-        upper_threshold = self._target_temperature + self._hot_tolerance
+        target = self._effective_target_temperature()
+        lower_threshold = target - self._cold_tolerance
+        upper_threshold = target + self._hot_tolerance
         
         self._debug_log(
             "thresholds: current=%.1f, lower=%.1f (target-%.1f), upper=%.1f (target+%.1f)",

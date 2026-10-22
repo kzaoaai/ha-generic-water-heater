@@ -117,6 +117,7 @@ async def test_the_options_form_refuses_a_mirror_and_keeps_the_entry(hass, world
         "temperatures": {},
         "cycle_protection": {},
         "smart_eco": {},
+        "surplus_boost": {},
         "fleet": {},
         "legionella": {},
         "hot_water_in_use": {},

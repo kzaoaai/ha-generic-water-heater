@@ -28,10 +28,10 @@ from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
+    eco_condition_configured,
     CONF_POWER_SENSOR,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR,
-    CONF_ECO_TEMPLATE,
     CONF_HEATER,
     CONF_LEGIONELLA_INTERVAL_DAYS,
     CONF_SENSOR,
@@ -181,7 +181,6 @@ class MaxTemperatureHistoryStoredData(SensorExtraStoredData):
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the 7-day max temperature sensor from a config entry."""
     data = {**entry.data, **getattr(entry, "options", {})}
-    eco_template = (data.get(CONF_ECO_TEMPLATE) or "").strip() or None
 
     entities = []
 
@@ -193,7 +192,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         hass, heater_entity_id, data.get(CONF_POWER_SENSOR)
     )
 
-    if eco_template is not None:
+    if eco_condition_configured(data):
         entities.append(
             SmartEcoStateSensor(
                 hass=hass,

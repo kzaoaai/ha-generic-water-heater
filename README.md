@@ -5,7 +5,8 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 ## Features
 
 - Thermostat-style control with configurable cold and hot tolerances.
-- Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode) plus a template condition.
+- Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode). Heating is allowed by named inputs (a surplus entity, a utility entity with its own **Eco: Use Utility** switch) and an optional template.
+- Surplus boost: while surplus is active and **Boost: Use PV Excess** is on, heat toward a higher target, storing spare power as heat without ever heating past the normal target on paid power.
 - Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
@@ -69,7 +70,7 @@ This integration is configured from the Home Assistant UI.
 ## Configuration Options
 
 The config flow groups these into collapsible sections — temperatures, cycle protection, Smart
-Eco, fleet, legionella, hot water in use, advanced — with the name, switch and sensor left at the
+Eco, surplus boost, fleet, legionella, hot water in use, metering, advanced — with the name, switch and sensor left at the
 top. The grouping is presentation only: options are stored flat under the keys below, so YAML,
 diagnostics and anything reading the entry see no sections.
 
@@ -84,7 +85,12 @@ diagnostics and anything reading the entry see no sections.
 | `max_temp` | float | `80.0` | Maximum selectable target temperature. |
 | `min_on_duration` | duration | `0 seconds` | Minimum time the heater must stay on before it can be turned off. |
 | `min_off_duration` | duration | `120 seconds` | Minimum time the heater must stay off before it can be turned on. A configured `0` means zero; the default applies only when the option is absent. |
-| `eco_mode_template_condition` | template | empty | Boolean template used by Smart Eco policy. If empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
+| `surplus_entity` | entity_id | empty | Says there is spare power to use (for example a PV-excess binary sensor). While active, heating is allowed, and the surplus boost may heat past the normal target. |
+| `surplus_state` | string | `on` | The state of `surplus_entity` that means active. Compared ignoring case. |
+| `utility_entity` | entity_id | empty | Says the utility supply is carrying the house. While active and the heater's **Eco: Use Utility** switch is on, heating is allowed up to the normal target. Adds that switch. |
+| `utility_state` | string | `on` | The state of `utility_entity` that means active, for example `Utility` for an enum power-source sensor. Compared ignoring case. |
+| `eco_mode_template_condition` | template | empty | Optional extra term: a boolean template that also allows heating when true. If this and both entities are empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
+| `surplus_boost_target_temperature` | number | empty | The boost target. Needs `surplus_entity`, must not exceed `max_temp`. Adds the **Boost: Use PV Excess** switch. Empty = no boost. |
 | `enable_legionella_sensor` | boolean | `false` | Adds the Legionella thermal-conditions sensor described below. |
 | `legionella_interval_days` | number | `7` | How long a completed disinfection cycle counts for before the sensor reports Elevated (and twice that before High). |
 | `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
@@ -92,7 +98,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
-| `power_sensor` | entity_id | empty | Optional meter on the element's circuit. Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit. Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. |
 
 ## Fleet Load Coordination
 
@@ -187,10 +193,21 @@ Behaviour while shed:
 
 Smart Eco Mode is a policy layer, not a water heater operation mode.
 
-When an eco template is configured, the integration exposes:
+When any eco input is configured (a surplus entity, a utility entity or a template), the
+integration exposes:
 
 - Select: `Smart Eco Mode`
 - Sensor: `Smart Eco State`
+- Switch: `Eco: Use Utility`, when a utility entity is configured
+- Switch: `Boost: Use PV Excess`, when a surplus entity and a boost target are configured
+
+The eco condition is true while **the surplus entity is active**, OR **the utility entity is
+active and Eco: Use Utility is on**, OR **the template is true**. An entity is active when its
+state equals its configured active state, ignoring case, so an enum sensor works as well as a
+binary one. An entity that is unavailable or unknown is not active. The two switches are policy
+choices, not manual control: toggling them never starts a Smart Eco pause. The heater owns and
+restores their state (its `eco_use_utility` and `surplus_boost_enabled` attributes). Use Utility
+starts on and Boost starts off.
 
 Available Smart Eco Mode options:
 
@@ -202,9 +219,27 @@ Available Smart Eco Mode options:
 
 High-level behavior:
 
-- If Smart Eco policy is actively enforcing and template is false, heating is blocked.
-- If Smart Eco policy is actively enforcing and template is true, heating is allowed.
+- If Smart Eco policy is actively enforcing and the eco condition is false, heating is blocked.
+- If Smart Eco policy is actively enforcing and the eco condition is true, heating is allowed.
 - If water heater mode is `off` while policy allows heating, last heating mode is restored.
+
+### Surplus boost
+
+With a boost target set and **Boost: Use PV Excess** on, a tank in `electric` heats toward the
+boost target instead of its normal one while the surplus entity is active. The published target
+temperature stays the person's own; `surplus_boost_active` and `surplus_boost_target` report the
+boost. When surplus leaves, the tank goes back to its normal target, so heat above that target is
+only ever drawn from surplus: on the utility or a battery the tank stops at its normal target.
+
+- Off stays off, `performance` is unchanged, a load shed outranks the boost, and a disinfection
+  cycle runs its own course.
+- A boost target at or below the normal target does nothing.
+- **Short-boost lockout.** A surplus detector that judges surplus from the battery sees the
+  heater's own draw: when the element needs more than the spare power, the battery discharges,
+  surplus clears a few minutes later, the element stops, the battery refills and surplus returns.
+  So when surplus leaves within 10 minutes of arriving while the boost had the element on, the
+  boost is not tried again for 30 minutes (`surplus_boost_locked_until`). Heating to the normal
+  target is never locked out.
 
 ### After a Home Assistant restart
 

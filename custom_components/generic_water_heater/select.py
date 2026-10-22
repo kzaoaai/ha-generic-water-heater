@@ -7,8 +7,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import (
+    eco_condition_configured,
     CONF_POWER_SENSOR,
-    CONF_ECO_TEMPLATE,
     CONF_ENABLE_LEGIONELLA_SENSOR,
     CONF_HEATER,
     DOMAIN,
@@ -67,7 +67,6 @@ _LEGACY_LEGIONELLA_OPTIONS = {
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up Smart Eco select for a config entry."""
     data = {**entry.data, **getattr(entry, "options", {})}
-    eco_template = (data.get(CONF_ECO_TEMPLATE) or "").strip() or None
 
     name = data.get(CONF_NAME)
     heater_entity_id = data.get(CONF_HEATER)
@@ -83,7 +82,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
     entities = []
-    if eco_template is not None:
+    if eco_condition_configured(data):
         entities.append(
             GenericWaterHeaterSmartEcoSelect(
                 hass=hass,

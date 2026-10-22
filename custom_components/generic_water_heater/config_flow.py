@@ -23,16 +23,26 @@ from . import (
     CONF_MIN_OFF_DURATION,
     CONF_MIN_ON_DURATION,
     CONF_SENSOR,
+    CONF_SURPLUS_BOOST_TARGET,
+    CONF_SURPLUS_ENTITY,
+    CONF_SURPLUS_STATE,
     CONF_TEMP_MAX,
+    CONF_UTILITY_ENTITY,
+    CONF_UTILITY_STATE,
     CONF_WATER_IN_USE_ENTITY,
     CONF_POWER_SENSOR,
     CONF_TEMP_MIN,
     CONF_TEMP_STEP,
+    DEFAULT_ACTIVE_STATE,
     DOMAIN,
     LEGACY_CONF_ECO_ENTITY,
     LEGACY_CONF_ECO_VALUE,
 )
 from .fleet import DEFAULT_STAGGER_SECONDS
+
+# What can say "surplus" or "the utility carries the house": an on/off entity,
+# or an enum sensor matched against its active state.
+_ECO_INPUT_DOMAINS = ["binary_sensor", "input_boolean", "switch", "sensor", "input_select"]
 
 
 def _eco_template_default(config: dict) -> str:
@@ -63,7 +73,15 @@ SECTIONS: dict[str, tuple[str, ...]] = {
         CONF_TEMP_MAX,
     ),
     "cycle_protection": (CONF_MIN_ON_DURATION, CONF_MIN_OFF_DURATION),
-    "smart_eco": (CONF_ECO_TEMPLATE, CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS),
+    "smart_eco": (
+        CONF_SURPLUS_ENTITY,
+        CONF_SURPLUS_STATE,
+        CONF_UTILITY_ENTITY,
+        CONF_UTILITY_STATE,
+        CONF_ECO_TEMPLATE,
+        CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
+    ),
+    "surplus_boost": (CONF_SURPLUS_BOOST_TARGET,),
     "fleet": (CONF_FLEET_STAGGER_SECONDS,),
     "legionella": (
         CONF_ENABLE_LEGIONELLA_SENSOR,
@@ -127,7 +145,26 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 ): selector({"duration": {}}),
             }),
 
+            # The two entity inputs follow the water-in-use pattern: no schema
+            # default (an entity selector rejects ""), only a suggested value,
+            # cleared to "" by _apply_cleared_and_defaults.
             vol.Required("smart_eco"): _section("smart_eco", {
+                vol.Optional(
+                    CONF_SURPLUS_ENTITY,
+                    description={"suggested_value": current.get(CONF_SURPLUS_ENTITY) or None},
+                ): selector({"entity": {"domain": _ECO_INPUT_DOMAINS}}),
+                vol.Optional(
+                    CONF_SURPLUS_STATE,
+                    default=current.get(CONF_SURPLUS_STATE) or DEFAULT_ACTIVE_STATE,
+                ): selector({"text": {}}),
+                vol.Optional(
+                    CONF_UTILITY_ENTITY,
+                    description={"suggested_value": current.get(CONF_UTILITY_ENTITY) or None},
+                ): selector({"entity": {"domain": _ECO_INPUT_DOMAINS}}),
+                vol.Optional(
+                    CONF_UTILITY_STATE,
+                    default=current.get(CONF_UTILITY_STATE) or DEFAULT_ACTIVE_STATE,
+                ): selector({"text": {}}),
                 vol.Optional(
                     CONF_ECO_TEMPLATE,
                     description={"suggested_value": _eco_template_default(current)},
@@ -136,6 +173,15 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                     CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS,
                     default=current.get(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6),
                 ): selector({"number": {"min": 1, "max": 48, "step": 1, "mode": "slider"}}),
+            }),
+
+            # No default: an empty boost target is "no boost", and a number
+            # selector cannot hold an empty default.
+            vol.Required("surplus_boost"): _section("surplus_boost", {
+                vol.Optional(
+                    CONF_SURPLUS_BOOST_TARGET,
+                    description={"suggested_value": current.get(CONF_SURPLUS_BOOST_TARGET)},
+                ): selector({"number": {"min": 0, "max": 100, "step": 0.5, "mode": "box"}}),
             }),
 
             vol.Required("fleet"): _section("fleet", {
@@ -209,6 +255,23 @@ def _power_sensor_errors(hass, flat: dict) -> dict:
     return {}
 
 
+def _surplus_boost_errors(flat: dict) -> dict:
+    """Refuse a boost the heater could never act on, or would act on unsafely.
+
+    Above the maximum it would heat past the range the person allowed; without
+    a surplus entity there is nothing to boost on. Both would otherwise be
+    accepted and do nothing, or the wrong thing, silently.
+    """
+    boost = flat.get(CONF_SURPLUS_BOOST_TARGET)
+    if boost in (None, ""):
+        return {}
+    if not (flat.get(CONF_SURPLUS_ENTITY) or "").strip():
+        return {"base": "surplus_boost_needs_surplus_entity"}
+    if float(boost) > float(flat.get(CONF_TEMP_MAX, 80.0)):
+        return {"base": "surplus_boost_above_max_temp"}
+    return {}
+
+
 def _apply_cleared_and_defaults(user_input: dict) -> dict:
     """Flatten, then persist cleared optional fields as empty rather than absent.
 
@@ -218,6 +281,11 @@ def _apply_cleared_and_defaults(user_input: dict) -> dict:
     """
     flat = flatten_sections(user_input)
     flat.setdefault(CONF_ECO_TEMPLATE, "")
+    flat.setdefault(CONF_SURPLUS_ENTITY, "")
+    flat.setdefault(CONF_SURPLUS_STATE, DEFAULT_ACTIVE_STATE)
+    flat.setdefault(CONF_UTILITY_ENTITY, "")
+    flat.setdefault(CONF_UTILITY_STATE, DEFAULT_ACTIVE_STATE)
+    flat.setdefault(CONF_SURPLUS_BOOST_TARGET, None)
     flat.setdefault(CONF_WATER_IN_USE_ENTITY, "")
     flat.setdefault(CONF_POWER_SENSOR, "")
     flat.setdefault(CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS, 6)
@@ -246,7 +314,7 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             flat = _apply_cleared_and_defaults(user_input)
-            errors = _power_sensor_errors(self.hass, flat)
+            errors = _power_sensor_errors(self.hass, flat) or _surplus_boost_errors(flat)
             if not errors:
                 return self.async_create_entry(title=flat[CONF_NAME], data=flat)
             return self.async_show_form(
@@ -264,7 +332,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current = {**self.config_entry.data, **self.config_entry.options}
         if user_input is not None:
             flat = _apply_cleared_and_defaults(user_input)
-            errors = _power_sensor_errors(self.hass, flat)
+            errors = _power_sensor_errors(self.hass, flat) or _surplus_boost_errors(flat)
             if not errors:
                 return self.async_create_entry(title="", data=flat)
             return self.async_show_form(

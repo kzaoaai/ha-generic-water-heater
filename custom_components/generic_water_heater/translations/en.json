@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Generic Water Heater Setup",
-        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
@@ -31,14 +31,32 @@
           },
           "smart_eco": {
             "name": "Smart Eco",
-            "description": "The condition that decides when heating is allowed, and how long a manual override pauses it.",
+            "description": "The entities and optional template that decide when heating is allowed, and how long a manual override pauses it.",
             "data": {
-              "eco_mode_template_condition": "Smart Eco Template Condition",
+              "surplus_entity": "Surplus entity",
+              "surplus_state": "Surplus active state",
+              "utility_entity": "Utility entity",
+              "utility_state": "Utility active state",
+              "eco_mode_template_condition": "Extra condition (template, optional)",
               "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume"
             },
             "data_description": {
-              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
+              "surplus_entity": "An entity that says there is spare power to use, for example a PV-excess binary sensor. While it is active, heating is allowed, and the surplus boost (below) may heat past the normal target.",
+              "surplus_state": "The state that means 'active'. 'on' for a binary sensor; for an enum sensor, the state to match. Compared ignoring case.",
+              "utility_entity": "An entity that says the utility supply is carrying the house. While it is active and the heater's 'Eco: Use Utility' switch is on, heating is allowed up to the normal target.",
+              "utility_state": "The state that means 'active', for example 'on', or 'Utility' for a power-source sensor. Compared ignoring case.",
+              "eco_mode_template_condition": "Optional. A boolean template that also allows heating when true, OR'd with the two entities above. Leave empty when the entities say everything. Smart Eco policy itself is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
               "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption. It is also the bound on 'Off until target reached': if the tank never reaches target, Smart Eco is restored after this long rather than staying down indefinitely."
+            }
+          },
+          "surplus_boost": {
+            "name": "Surplus boost",
+            "description": "Store spare power as heat: while the surplus entity is active and the 'Boost: Use PV Excess' switch is on, heat toward this higher target instead of the normal one.",
+            "data": {
+              "surplus_boost_target_temperature": "Boost target temperature"
+            },
+            "data_description": {
+              "surplus_boost_target_temperature": "Leave empty for no boost. Must not exceed the maximum temperature. Heat above the normal target is only ever drawn while surplus is active; on the utility or a battery the heater stops at its normal target. A boost that loses its surplus within 10 minutes of starting is not tried again for 30 minutes, so a heater that eats the very surplus it is chasing does not cycle every few minutes."
             }
           },
           "fleet": {
@@ -101,14 +119,16 @@
       }
     },
     "error": {
-      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself."
+      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
+      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "surplus_boost_above_max_temp": "The boost target is above the maximum temperature."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Generic Water Heater Options",
-        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the template below as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
@@ -136,14 +156,32 @@
           },
           "smart_eco": {
             "name": "Smart Eco",
-            "description": "The condition that decides when heating is allowed, and how long a manual override pauses it.",
+            "description": "The entities and optional template that decide when heating is allowed, and how long a manual override pauses it.",
             "data": {
-              "eco_mode_template_condition": "Smart Eco Template Condition",
+              "surplus_entity": "Surplus entity",
+              "surplus_state": "Surplus active state",
+              "utility_entity": "Utility entity",
+              "utility_state": "Utility active state",
+              "eco_mode_template_condition": "Extra condition (template, optional)",
               "smart_eco_manual_off_resume_hours": "Smart Eco Mode Auto Resume"
             },
             "data_description": {
-              "eco_mode_template_condition": "Boolean template used by Smart Eco policy. Smart Eco policy is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
+              "surplus_entity": "An entity that says there is spare power to use, for example a PV-excess binary sensor. While it is active, heating is allowed, and the surplus boost (below) may heat past the normal target.",
+              "surplus_state": "The state that means 'active'. 'on' for a binary sensor; for an enum sensor, the state to match. Compared ignoring case.",
+              "utility_entity": "An entity that says the utility supply is carrying the house. While it is active and the heater's 'Eco: Use Utility' switch is on, heating is allowed up to the normal target.",
+              "utility_state": "The state that means 'active', for example 'on', or 'Utility' for a power-source sensor. Compared ignoring case.",
+              "eco_mode_template_condition": "Optional. A boolean template that also allows heating when true, OR'd with the two entities above. Leave empty when the entities say everything. Smart Eco policy itself is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
               "smart_eco_manual_off_resume_hours": "In Smart Eco Mode 'Auto Resume after Delay', manual OFF pauses Smart Eco policy for this many hours before automatic resumption. It is also the bound on 'Off until target reached': if the tank never reaches target, Smart Eco is restored after this long rather than staying down indefinitely."
+            }
+          },
+          "surplus_boost": {
+            "name": "Surplus boost",
+            "description": "Store spare power as heat: while the surplus entity is active and the 'Boost: Use PV Excess' switch is on, heat toward this higher target instead of the normal one.",
+            "data": {
+              "surplus_boost_target_temperature": "Boost target temperature"
+            },
+            "data_description": {
+              "surplus_boost_target_temperature": "Leave empty for no boost. Must not exceed the maximum temperature. Heat above the normal target is only ever drawn while surplus is active; on the utility or a battery the heater stops at its normal target. A boost that loses its surplus within 10 minutes of starting is not tried again for 30 minutes, so a heater that eats the very surplus it is chasing does not cycle every few minutes."
             }
           },
           "fleet": {
@@ -206,7 +244,9 @@
       }
     },
     "error": {
-      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself."
+      "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
+      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "surplus_boost_above_max_temp": "The boost target is above the maximum temperature."
     }
   }
 }
