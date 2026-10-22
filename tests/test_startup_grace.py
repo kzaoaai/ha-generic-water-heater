@@ -12,7 +12,12 @@ from datetime import datetime, timedelta, timezone
 
 from freezegun import freeze_time
 import pytest
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_OFF, STATE_ON
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    EVENT_STATE_CHANGED,
+    STATE_OFF,
+    STATE_ON,
+)
 from homeassistant.core import CoreState, State
 from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
@@ -214,8 +219,18 @@ async def test_a_stale_switch_event_is_not_a_person(hass, world):  # noqa: F811
         assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
 
         commands = cap_switch_commands(hass, world)
-        hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
-        hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+        # Deliver the overtaken event directly. Core 2025.1 dispatched state
+        # listeners with call_soon, so two back-to-back writes produced it;
+        # 2026.x dispatches synchronously inside async_set, so they no longer do.
+        on = hass.states.get(UPSTAIRS_SWITCH)
+        hass.bus.async_fire(
+            EVENT_STATE_CHANGED,
+            {
+                "entity_id": UPSTAIRS_SWITCH,
+                "old_state": on,
+                "new_state": State(UPSTAIRS_SWITCH, STATE_OFF),
+            },
+        )
         await hass.async_block_till_done()
 
         assert commands["n"] < COMMAND_CAP, "override and control loop chased each other"

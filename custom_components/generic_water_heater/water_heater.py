@@ -811,6 +811,20 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("disinfection: ended (%s), back to %s", reason, prior)
 
     @callback
+    def adopt_restored_legionella_mode(self, mode: str) -> None:
+        """Take the policy the select restored, when we restored none.
+
+        Not ``async_set_legionella_mode``: that is a person choosing, which
+        starts a one-shot now and drops a give-up backoff. A restore is neither.
+        """
+        if mode not in LEGIONELLA_MODES:
+            return
+        self._legionella_mode = mode
+        self._runtime["legionella_mode"] = mode
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @callback
     def _notify_legionella_select(self) -> None:
         """Refresh the policy select after the integration changes it."""
         async_dispatcher_send(
@@ -1105,7 +1119,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     if isinstance(restored_started, str)
                     else dt_util.utcnow().isoformat()
                 )
-        
+
+        # The policy select restores from its own history too, and since
+        # 2026.x the platforms set up in either order. If we had nothing of our
+        # own, take what the select already restored; if it has not run yet,
+        # this flag tells it to restore and hand us the value.
+        restored_policy = (
+            old_state is not None
+            and old_state.attributes.get("legionella_mode") in LEGIONELLA_MODES
+        )
+        if not restored_policy:
+            self.adopt_restored_legionella_mode(
+                self._runtime.get("legionella_mode", LEGIONELLA_MODE_OFF)
+            )
+        self._runtime["legionella_restored"] = restored_policy
+
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
             self._target_temperature = self.min_temp

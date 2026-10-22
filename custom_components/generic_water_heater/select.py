@@ -250,14 +250,20 @@ class GenericWaterHeaterLegionellaSelect(SelectEntity, RestoreEntity):
         # Both this entity and the water heater persist the policy and restore
         # it independently. The water heater is authoritative, because it also
         # owns whether a cycle is actually in flight -- so only seed from our
-        # own history when it has not set up yet.
-        if self._runtime.get("water_heater_entity") is None:
+        # own history when it restored none. "legionella_restored" is absent
+        # until the heater has looked, False if it found nothing. Since 2026.x
+        # the platforms set up in either order, so both cases happen.
+        heater_restored = self._runtime.get("legionella_restored")
+        if not heater_restored:
             if (old_state := await self.async_get_last_state()) is not None:
                 restored = _OPTION_TO_LEGIONELLA.get(
                     old_state.state
                 ) or _LEGACY_LEGIONELLA_OPTIONS.get(old_state.state)
                 if restored is not None:
                     self._runtime["legionella_mode"] = restored
+                    wh_entity = self._runtime.get("water_heater_entity")
+                    if heater_restored is False and wh_entity is not None:
+                        wh_entity.adopt_restored_legionella_mode(restored)
 
         self._runtime["legionella_select_entity"] = self
         self.async_on_remove(

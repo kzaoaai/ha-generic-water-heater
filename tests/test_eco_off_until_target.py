@@ -579,17 +579,82 @@ async def test_as_needed_does_not_start_on_a_low_tank(hass, world):  # noqa: F81
         ("On", "As needed (eco)"),
     ],
 )
-async def test_an_old_label_restores_as_its_new_name(hass, world, old_label, new_label):  # noqa: F811
-    """A select restores from its own last STATE STRING; 4.0.0 renamed them all."""
+@pytest.mark.parametrize("first", ["water_heater", "select"])
+async def test_an_old_label_restores_as_its_new_name(
+    hass, world, old_label, new_label, first  # noqa: F811
+):
+    """A select restores from its own last STATE STRING; 4.0.0 renamed them all.
+
+    The heater has no history of its own here, so the select's value is the
+    only one, and the heater must end up running it too. Since 2026.x the
+    platforms set up in either order -- unpinned, this test flaked on which
+    went first -- so each order is forced in turn.
+    """
     from homeassistant.core import State
     from pytest_homeassistant_custom_component.common import mock_restore_cache
 
+    from custom_components.generic_water_heater.select import _OPTION_TO_LEGIONELLA
+
+    forward = hass.config_entries.async_forward_entry_setups
+
+    async def in_order(entry, platforms):
+        ordered = sorted(platforms, key=lambda platform: platform != first)
+        for platform in ordered:
+            await forward(entry, [platform])
+
     mock_restore_cache(hass, (State(LEG_SELECT, old_label),))
     hass.states.async_set(PV_EXCESS, "off")
-    await setup_both(hass, enable_legionella_sensor=True)
+    with patch.object(
+        hass.config_entries, "async_forward_entry_setups", side_effect=in_order
+    ):
+        await setup_both(hass, enable_legionella_sensor=True)
     await hass.async_block_till_done()
 
     assert hass.states.get(LEG_SELECT).state == new_label
+    assert (
+        hass.states.get(UPSTAIRS).attributes["legionella_mode"]
+        == _OPTION_TO_LEGIONELLA[new_label]
+    )
+
+
+@pytest.mark.parametrize("first", ["water_heater", "select"])
+async def test_the_heaters_own_policy_outranks_the_selects(hass, world, first):  # noqa: F811
+    """When the two histories disagree, the heater's wins in either order."""
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    from custom_components.generic_water_heater.select import _OPTION_TO_LEGIONELLA
+
+    forward = hass.config_entries.async_forward_entry_setups
+
+    async def in_order(entry, platforms):
+        ordered = sorted(platforms, key=lambda platform: platform != first)
+        for platform in ordered:
+            await forward(entry, [platform])
+
+    mock_restore_cache(
+        hass,
+        (
+            State(LEG_SELECT, "As needed (eco)"),
+            State(
+                UPSTAIRS,
+                "electric",
+                {"legionella_mode": _OPTION_TO_LEGIONELLA["Off"]},
+            ),
+        ),
+    )
+    hass.states.async_set(PV_EXCESS, "off")
+    with patch.object(
+        hass.config_entries, "async_forward_entry_setups", side_effect=in_order
+    ):
+        await setup_both(hass, enable_legionella_sensor=True)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(LEG_SELECT).state == "Off"
+    assert (
+        hass.states.get(UPSTAIRS).attributes["legionella_mode"]
+        == _OPTION_TO_LEGIONELLA["Off"]
+    )
 
 
 async def test_an_old_label_in_a_service_call_is_rejected(hass, world):  # noqa: F811

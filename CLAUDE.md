@@ -39,6 +39,13 @@ turns an automation into a silent no-op.
 The legacy map is still required, separately, for restore: a select restores from its own last state
 *string*, so without it an upgrade quietly reads the default.
 
+The Legionella select and the water heater both restore the policy, and since 2026.x the platforms
+set up in either order. The heater's own history wins; `runtime["legionella_restored"]` (absent
+until the heater has looked, `False` if it found nothing) tells the select whether to restore its
+own and hand it to the heater with `adopt_restored_legionella_mode`, which is not a person choosing
+and so starts no one-shot. Tests that care force each order by patching
+`async_forward_entry_setups`; left unpinned, they flake.
+
 ### The options flow is sectioned, but storage is FLAT — and a partial submission is destructive
 
 The form groups fields into collapsible sections; `flatten_sections()` keeps what is stored flat, so
@@ -127,6 +134,12 @@ unavailable. The echo record **must expire**: without it, a lost OFF followed by
 reads as our echo and the element comes back on, making OFF unreachable. Two genuine flips 50 ms
 apart still count as a person — nothing distinguishes a fast replay from a hand.
 
+The stale-event branch was written against 2025.1, which delivered state listeners with
+`call_soon`, so two back-to-back writes produced an overtaken event. 2026.x runs them
+synchronously inside `async_set`, so real state writes no longer reach that branch; the test
+fires the stale `state_changed` event on the bus directly. The branch stays as a guard, not as
+something production exercises.
+
 ### A disinfection cycle ends on a completed hold, not on the risk verdict
 
 One-shots (`Once`, `Once (eco)`) start immediately even when risk is Low; the standing `As needed`
@@ -171,9 +184,8 @@ hand-written identifier does not survive, and clearing the meter unlinks it by i
 
 **Before 2026.9 an identifier cannot be on two devices**: declaring the meter's would make the
 heater's entities fail to set up. `LINKED_DEVICES_SINCE` gates it (2026.6 still refuses;
-2026.9.4 links; 2026.7-8 untested). The repo's test venv is 2025.1, where the link tests skip;
-they were run on a scratch 2026.9.4 venv. On that core `test_a_stale_switch_event_is_not_a_person`
-fails at 4.3.1 too, before this change: an open item, below.
+2026.9.4 links; 2026.7-8 untested). The repo's test venv is 2026.9.4, so the link tests run and
+the one test of the pre-2026.9 guard skips; that one needs an older core.
 
 4.3.x used `via_device` ("Connected via") for this, which was not what was wanted. 4.4.0 clears
 a link 4.3.x recorded in the `generic_water_heater.meter_links` Store, only if it is unchanged
@@ -192,9 +204,18 @@ deployed but the old behaviour persists, that is the first thing to check, not a
 .venv/bin/python -m pytest -q
 ```
 
-**The test venv's `homeassistant` is several major versions behind what this gets deployed against.**
-The suite passing is not proof against a current core. Check the real version before relying on any
-core API or internal.
+The test venv is Home Assistant 2026.9.4 on Python 3.14 (since 2026-10-23; it was 2025.1 before).
+Rebuild it with:
+
+```bash
+uv venv -p 3.14 .venv
+uv pip install -p .venv/bin/python "homeassistant==2026.9.4" "pytest-homeassistant-custom-component==0.13.367"
+```
+
+**Keep it on the core this gets deployed against.** Core behaviour this suite depends on moves
+between releases (listener dispatch and platform setup order both did between 2025.1 and 2026.9),
+so a pass on an older core is not proof against the current one. Check the real version before
+relying on any core API or internal.
 
 ### Mutation testing is the house standard for anything safety-relevant
 
@@ -265,10 +286,8 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
-- On Home Assistant 2026.9.4, `test_startup_grace.py::test_a_stale_switch_event_is_not_a_person`
-  fails (also at 4.3.1, so not the linked-device change); the event loop reports the test taking
-  121 s of frozen time. Not investigated. The repo's venv (2025.1) passes it.
-
+- `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.9.4 venv. Run it on an
+  older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,
   remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to
   `async_remove_device` / `new_config_entry_id`.
