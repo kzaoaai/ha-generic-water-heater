@@ -216,7 +216,7 @@ hand-written identifier does not survive, and clearing the meter unlinks it by i
 
 **Before 2026.9 an identifier cannot be on two devices**: declaring the meter's would make the
 heater's entities fail to set up. `LINKED_DEVICES_SINCE` gates it (2026.6 still refuses;
-2026.9.4 links; 2026.7-8 untested). The repo's test venv is 2026.9.4, so the link tests run and
+2026.9.4 links; 2026.7-8 untested). The repo's test venv is 2026.10.2, so the link tests run and
 the one test of the pre-2026.9 guard skips; that one needs an older core.
 
 4.3.x used `via_device` ("Connected via") for this, which was not what was wanted. 4.4.0 clears
@@ -236,12 +236,13 @@ deployed but the old behaviour persists, that is the first thing to check, not a
 .venv/bin/python -m pytest -q
 ```
 
-The test venv is Home Assistant 2026.9.4 on Python 3.14 (since 2026-10-23; it was 2025.1 before).
+The test venv is Home Assistant 2026.10.2 on Python 3.14, the core production runs (since
+2026-10-23; it was 2025.1, then 2026.9.4 for a day, before production was found on 2026.10.2).
 Rebuild it with:
 
 ```bash
 uv venv -p 3.14 .venv
-uv pip install -p .venv/bin/python "homeassistant==2026.9.4" "pytest-homeassistant-custom-component==0.13.367"
+uv pip install -p .venv/bin/python "homeassistant==2026.10.2" "pytest-homeassistant-custom-component==0.13.373"
 ```
 
 **Keep it on the core this gets deployed against.** Core behaviour this suite depends on moves
@@ -319,7 +320,7 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
-- `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.9.4 venv. Run it on an
+- `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,
   remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to
