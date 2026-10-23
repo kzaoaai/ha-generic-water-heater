@@ -336,8 +336,12 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
-- The surplus boost has been seen on hardware heating on surplus and stopping at its target (the
-  relay opened 87 ms after the 61 C reading). Not yet seen: the short-boost lockout firing.
+- The surplus boost has been seen on hardware heating on surplus, stopping at its target (the relay
+  opened 87 ms after the 61 C reading) and locking out twice in one afternoon, the element starting
+  again at the exact moment a lockout ended. Weak spot seen the same afternoon: the short window is
+  measured from surplus arriving (`_surplus_window_start`), so the first short boost after a long
+  sunny stretch is not locked out and costs one 2-3 minute battery draw before the next one is.
+  Measuring from the boost's own start would catch it; not done, as the cost was small.
 - **Since 4.6.0 a long silent gap can count toward a disinfection hold** (`MAX_ELEMENT_OFF_GAP`,
   `sensor.py`): up to 2 h, when the heater switch stayed off for the whole gap (`_element_off_since`:
   off now and `last_changed` no later than the gap's start) and both readings are at or above 60 C.
