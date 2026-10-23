@@ -183,7 +183,10 @@ Toggling them is a policy choice, never a manual override.
 ### The surplus boost only ever adds heat, and only on surplus
 
 While surplus is active and **Boost: Use PV Excess** is on, a tank in `electric` aims at the boost
-target (`_effective_target_temperature`); the published target stays the person's. Off, performance,
+target (`_effective_target_temperature`); the published target stays the person's. Since 4.5.1 a
+boost stops AT its target (no hot tolerance on top, so a 61 °C boost no longer runs to 64 °C), and
+the boost target is not bounded by `max_temp`: that is the range of the everyday target dial, and
+tying the two forced the dial range up just to admit a boost. Off, performance,
 a shed and a disinfection cycle all exclude it, and a boost target at or below the normal target
 does nothing. Felicity-style surplus detectors judge surplus from the battery, so they see the
 heater's own draw: on 2026-10-18 two heaters cycled six times in an hour, 2-3 minutes each, because

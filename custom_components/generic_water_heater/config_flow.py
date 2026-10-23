@@ -256,19 +256,21 @@ def _power_sensor_errors(hass, flat: dict) -> dict:
 
 
 def _surplus_boost_errors(flat: dict) -> dict:
-    """Refuse a boost the heater could never act on, or would act on unsafely.
+    """Refuse a boost the heater could never act on.
 
-    Above the maximum it would heat past the range the person allowed; without
-    a surplus entity there is nothing to boost on. Both would otherwise be
-    accepted and do nothing, or the wrong thing, silently.
+    Without a surplus entity there is nothing to boost on, and it would
+    otherwise be accepted and do nothing, silently.
+
+    Deliberately NOT bounded by max_temp (4.5.1). That is the range of the
+    target dial a person sets every day; the boost target is set once by the
+    owner, and tying the two forced the dial range up just to admit a boost.
+    The number selector bounds it to 0-100.
     """
     boost = flat.get(CONF_SURPLUS_BOOST_TARGET)
     if boost in (None, ""):
         return {}
     if not (flat.get(CONF_SURPLUS_ENTITY) or "").strip():
         return {"base": "surplus_boost_needs_surplus_entity"}
-    if float(boost) > float(flat.get(CONF_TEMP_MAX, 80.0)):
-        return {"base": "surplus_boost_above_max_temp"}
     return {}
 
 

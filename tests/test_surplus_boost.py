@@ -16,6 +16,7 @@ from homeassistant.const import STATE_OFF, STATE_ON
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.generic_water_heater import (
+    CONF_COLD_TOLERANCE,
     CONF_HOT_TOLERANCE,
     DOMAIN,
     SERVICE_SHED,
@@ -245,7 +246,8 @@ def test_a_boost_needs_a_surplus_entity():
     assert _surplus_boost_errors(flat) == {"base": "surplus_boost_needs_surplus_entity"}
 
 
-def test_a_boost_above_the_maximum_is_refused():
+def test_the_dial_maximum_does_not_bound_the_boost():
+    """max_temp is the target dial's range; the boost target is set once."""
     flat = _apply_cleared_and_defaults(
         {
             "temperatures": {"max_temp": 60},
@@ -253,7 +255,7 @@ def test_a_boost_above_the_maximum_is_refused():
             "surplus_boost": {"surplus_boost_target_temperature": 61},
         }
     )
-    assert _surplus_boost_errors(flat) == {"base": "surplus_boost_above_max_temp"}
+    assert _surplus_boost_errors(flat) == {}
 
 
 def test_no_boost_target_is_no_boost_and_no_error():
@@ -337,3 +339,38 @@ async def test_a_boost_that_finished_before_surplus_left_is_not_locked_out(hass,
         frozen.tick(timedelta(minutes=3))
         await set_state(hass, PV_EXCESS, STATE_OFF)
         assert heater(hass).attributes["surplus_boost_locked_until"] is None
+
+
+async def test_the_boost_stops_at_its_target_not_past_it(hass, world):  # noqa: F811
+    """The hot tolerance is not added on top: a 61 C boost peaks at 61 C."""
+    await boosting(hass, **{CONF_HOT_TOLERANCE: 3.0, CONF_COLD_TOLERANCE: 2.0})
+    await set_state(hass, PV_EXCESS, STATE_ON)
+    assert switch_on(hass)
+    for reading in ("55", "58", "61"):
+        hass.states.async_set(UPSTAIRS_SENSOR, reading, {"device_class": "temperature"})
+        await hass.async_block_till_done()
+    assert not switch_on(hass)
+
+    # Inside the cold tolerance it stays off; below it, it starts again.
+    hass.states.async_set(UPSTAIRS_SENSOR, "59.5", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not switch_on(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "59", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert switch_on(hass)
+
+
+async def test_normal_heating_still_runs_to_the_hot_tolerance(hass, world):  # noqa: F811
+    """Only the boost drops the hot tolerance; the normal target keeps it."""
+    await setup_inputs(
+        hass, temperature="46", utility=False, boost=61.0,
+        **{CONF_HOT_TOLERANCE: 3.0, CONF_COLD_TOLERANCE: 2.0},
+    )
+    await set_state(hass, PV_EXCESS, STATE_ON)
+    assert switch_on(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "51", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert switch_on(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "53", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not switch_on(hass)

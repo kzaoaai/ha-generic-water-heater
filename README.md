@@ -90,7 +90,7 @@ diagnostics and anything reading the entry see no sections.
 | `utility_entity` | entity_id | empty | Says the utility supply is carrying the house. While active and the heater's **Eco: Use Utility** switch is on, heating is allowed up to the normal target. Adds that switch. |
 | `utility_state` | string | `on` | The state of `utility_entity` that means active, for example `Utility` for an enum power-source sensor. Compared ignoring case. |
 | `eco_mode_template_condition` | template | empty | Optional extra term: a boolean template that also allows heating when true. If this and both entities are empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
-| `surplus_boost_target_temperature` | number | empty | The boost target. Needs `surplus_entity`, must not exceed `max_temp`. Adds the **Boost: Use PV Excess** switch. Empty = no boost. |
+| `surplus_boost_target_temperature` | number | empty | The boost target, and the boost's peak: the boost stops at exactly this temperature. Needs `surplus_entity`. Not limited by `max_temp`, which only bounds the target dial. Adds the **Boost: Use PV Excess** switch. Empty = no boost. |
 | `enable_legionella_sensor` | boolean | `false` | Adds the Legionella thermal-conditions sensor described below. |
 | `legionella_interval_days` | number | `7` | How long a completed disinfection cycle counts for before the sensor reports Elevated (and twice that before High). |
 | `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
@@ -230,6 +230,10 @@ boost target instead of its normal one while the surplus entity is active. The p
 temperature stays the person's own; `surplus_boost_active` and `surplus_boost_target` report the
 boost. When surplus leaves, the tank goes back to its normal target, so heat above that target is
 only ever drawn from surplus: on the utility or a battery the tank stops at its normal target.
+
+The boost stops at exactly its target: the hot tolerance is not added on top, so the number set is
+the peak. The cold tolerance still decides when it starts again. The boost target is not limited by
+`max_temp`, which bounds only the target dial a person sets every day.
 
 - Off stays off, `performance` is unchanged, a load shed outranks the boost, and a disinfection
   cycle runs its own course.

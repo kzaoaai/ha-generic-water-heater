@@ -2378,7 +2378,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # Logic: Turn ON if temp <= target - cold_tolerance. Turn OFF if temp >= target + hot_tolerance.
         target = self._effective_target_temperature()
         lower_threshold = target - self._cold_tolerance
-        upper_threshold = target + self._hot_tolerance
+        # A boost stops AT its target (4.5.1), so the number the owner set is
+        # the peak: with the hot tolerance on top, a 61 C boost ran to 64 C. The
+        # cold tolerance still decides when it starts again.
+        if self._surplus_boost_active():
+            upper_threshold = target
+        else:
+            upper_threshold = target + self._hot_tolerance
         
         self._debug_log(
             "thresholds: current=%.1f, lower=%.1f (target-%.1f), upper=%.1f (target+%.1f)",
