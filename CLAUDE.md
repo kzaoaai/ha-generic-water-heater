@@ -323,10 +323,17 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
-- The surplus boost has been seen heating on surplus on hardware, but not yet: a boost reaching its
-  target and stopping, the short-boost lockout firing, or whether a boost band of target minus the
-  cold tolerance up to target (59-61 C with a 61 C target and 2 C tolerance) banks disinfection
-  holds. The hold closes below `DISINFECTION_SUSTAIN_C` (59, `sensor.py`), so that margin is thin.
+- The surplus boost has been seen on hardware heating on surplus and stopping at its target (the
+  relay opened 87 ms after the 61 C reading). Not yet seen: the short-boost lockout firing.
+- **A boost does not bank disinfection holds on a sensor that reports only on change.** Idle at its
+  boost target, a tank cools slowly, and a sensor that reports only on a ~0.5 C step can stay silent
+  for more than `MAX_CREDITED_GAP` (30 min, `sensor.py`). `_advance_hold` credits nothing across such
+  a gap, so the hold stalls while the tank sits above 60 C (seen: progress stuck at 10.8 min with no
+  report for 34+ min). Performance does not hit this because the mechanical thermostat keeps the
+  temperature, and so the reports, moving. A possible refinement: credit a long gap when both
+  endpoints are at or above 60 C and the element was off for the whole gap (with no heat source the
+  temperature can only fall, so it cannot have dipped and come back). It needs the heater's switch
+  history in the risk sensor, and it loosens a deliberately conservative rule.
 - `smart_eco_state` carries a relative countdown ("Resuming in 05H 59M") and is rewritten every
   minute during a timed pause (`_schedule_smart_eco_countdown_tick`), so each paused heater writes a
   recorder row a minute. `smart_eco_resume_at` already publishes the absolute deadline. Check every
