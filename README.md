@@ -7,7 +7,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Thermostat-style control with configurable cold and hot tolerances.
 - Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode). Heating is allowed by named inputs (a surplus entity, a utility entity with its own **Eco: Use Utility** switch) and an optional template.
 - Surplus boost: while surplus is active and **Boost: Use PV Excess** is on, heat toward a higher target, storing spare power as heat without ever heating past the normal target on paid power.
-- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, countdown states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
+- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, timed pause states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
   A switch returning from `unavailable` is **not** treated as a manual action: it is a device
@@ -15,7 +15,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   dropout could be read as "someone flipped it on", promoting `electric` to `performance` and
   running the element to the tank's own mechanical cutout. A genuine flip still arrives as a real
   `off` -> `on` transition and behaves exactly as before.
-- Always ON temporary override behavior for manual underlying switch changes, with countdown state and persistent notifications.
+- Always ON temporary override behavior for manual underlying switch changes, with an override state, an absolute resume time and persistent notifications.
 - Minimum on and off durations to avoid rapid switching.
 - Fleet load coordination across every instance, so several heaters cannot step onto a shared inverter or generator at the same moment.
 - Failsafe shutdown when the temperature sensor becomes unavailable.
@@ -95,7 +95,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_legionella_sensor` | boolean | `false` | Adds the Legionella thermal-conditions sensor described below. |
 | `legionella_interval_days` | number | `7` | How long a completed disinfection cycle counts for before the sensor reports Elevated (and twice that before High). |
 | `fleet_stagger_seconds` | number | `60` | Minimum spacing between this heater switching on and any other instance switching on. `0` disables staggering. The largest value set on any instance applies to the whole fleet. |
-| `smart_eco_manual_off_resume_hours` | number (slider) | `6` | Auto-resume/override duration in hours (range: `1` to `48`). Used by Auto Resume after Delay and Always ON temporary override countdowns. |
+| `smart_eco_manual_off_resume_hours` | number (slider) | `6` | Auto-resume/override duration in hours (range: `1` to `48`). Used by Auto Resume after Delay and Always ON temporary overrides. |
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
@@ -272,7 +272,7 @@ the tank has reached target and stayed idle for a minute. The Smart Eco State se
 
 Use it when you want hot water now and do not want to remember to switch the policy back on. Turning
 the tank **off**, or changing the operation mode, takes the *timed* path instead
-(`smart_eco_manual_off_resume_hours`), which reads as a `Resuming in HH MM` countdown.
+(`smart_eco_manual_off_resume_hours`), which reads `Paused by manual control` until it ends.
 
 **This does not work for `performance`.** That mode holds the element on unconditionally, so the
 appliance's own mechanical thermostat is what eventually stops it and Home Assistant never sees
@@ -314,8 +314,27 @@ Always ON temporary override details:
 
 - Trigger: manual toggle of the underlying heater switch (for example, panel/smart-breaker action).
 - Duration: uses `smart_eco_manual_off_resume_hours`.
-- State sensor: shows `Always ON override (Resuming in XXH YYM)`.
+- State sensor: shows `Always ON override (Paused by manual control)`.
 - Notifications: Home Assistant persistent notifications are created when override starts and when policy resumes.
+
+A timed pause, either kind, keeps the same label until it ends: the label does not count down.
+When it ends is the heater's `smart_eco_resume_at` attribute, an absolute time, and a dashboard
+can count down to that by itself:
+
+```yaml
+type: entities
+entities:
+  - type: attribute
+    entity: water_heater.example
+    attribute: smart_eco_resume_at
+    name: Smart Eco resumes
+    format: relative
+```
+
+Until 4.6.0 the label was a `Resuming in HH MM` countdown, refreshed every minute, which rewrote the
+heater's state and the Smart Eco State sensor's, and so added two recorder rows a minute per paused
+heater for as long as the pause lasted. A template that matched that text should test
+`smart_eco_pause_reason == "manual_off_timer"` instead, which is unchanged.
 
 Examples:
 

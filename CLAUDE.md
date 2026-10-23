@@ -226,6 +226,19 @@ the one test of the pre-2026.9 guard skips; that one needs an older core.
 a link 4.3.x recorded in the `generic_water_heater.meter_links` Store, only if it is unchanged
 since, and drops the record.
 
+### Publish deadlines, never time remaining
+
+A timed Smart Eco pause keeps one `smart_eco_state` label for its whole length (`Paused by manual
+control`, or `Always ON override (Paused by manual control)`); when it ends is
+`smart_eco_resume_at`, an absolute time a frontend counts down to by itself. Until 4.6.0 the label
+was a countdown refreshed every minute, which rewrote the heater's state and the Smart Eco State
+sensor's: two recorder rows a minute per paused heater, for up to 48 hours. Anything that changes
+only because the clock moved does not belong in a state or an attribute. An integration cannot keep
+its own entity's state out of the recorder (`_unrecorded_attributes` drops attributes, not the
+row), so "exclude it from the recorder" is not a fix. `test_smart_eco_pause_writes.py` counts the
+writes through a pause, and through a reload mid-pause: the restore branch armed the old tick
+separately.
+
 ### A config-entry reload does not re-import module code
 
 Only a restart loads changed Python. Stale traceback line numbers are the tell. When a change is
@@ -334,10 +347,6 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   endpoints are at or above 60 C and the element was off for the whole gap (with no heat source the
   temperature can only fall, so it cannot have dipped and come back). It needs the heater's switch
   history in the risk sensor, and it loosens a deliberately conservative rule.
-- `smart_eco_state` carries a relative countdown ("Resuming in 05H 59M") and is rewritten every
-  minute during a timed pause (`_schedule_smart_eco_countdown_tick`), so each paused heater writes a
-  recorder row a minute. `smart_eco_resume_at` already publishes the absolute deadline. Check every
-  consumer of `smart_eco_state` before changing its values.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,

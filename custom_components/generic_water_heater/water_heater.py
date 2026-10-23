@@ -361,7 +361,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._smart_eco_manual_off_resume_hours = int(manual_off_resume_hours)
         self._smart_eco_idle_since = None
         self._smart_eco_resume_timer = None
-        self._smart_eco_countdown_timer = None
         self._debug_logging = bool(debug_logging)
         self._eco_condition_met = False
         self._startup_grace_active = False
@@ -1269,7 +1268,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                         remaining,
                         self._async_resume_smart_eco_from_timer,
                     )
-                    self._schedule_smart_eco_countdown_tick()
                 else:
                     self._clear_smart_eco_pause_state()
 
@@ -1316,7 +1314,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         for cancel_timer in (
             self._cooldown_timer,
             self._smart_eco_resume_timer,
-            self._smart_eco_countdown_timer,
             self._surplus_boost_lockout_timer,
         ):
             if cancel_timer is not None:
@@ -1324,7 +1321,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._surplus_boost_lockout_timer = None
         self._cooldown_timer = None
         self._smart_eco_resume_timer = None
-        self._smart_eco_countdown_timer = None
         await super().async_will_remove_from_hass()
 
     async def _async_sensor_changed(self, value, _when, _attributes):
@@ -1893,10 +1889,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._smart_eco_resume_timer()
             self._smart_eco_resume_timer = None
 
-        if self._smart_eco_countdown_timer is not None:
-            self._smart_eco_countdown_timer()
-            self._smart_eco_countdown_timer = None
-
         persistent_notification.async_dismiss(
             self.hass,
             self._always_on_override_notification_id,
@@ -1920,7 +1912,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._smart_eco_manual_off_resume_hours * 3600,
             self._async_resume_smart_eco_from_timer,
         )
-        self._schedule_smart_eco_countdown_tick()
         self._debug_log(
             "smart eco paused by manual control for %sh (action=%s, source=%s)",
             self._smart_eco_manual_off_resume_hours,
@@ -1950,21 +1941,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             notification_id=self._always_on_override_notification_id,
         )
 
-    def _format_resume_countdown_state(self) -> str:
-        """Return a human-readable countdown state label."""
-        if not self._smart_eco_resume_at:
-            return "Paused by manual control"
-
-        resume_at = dt_util.parse_datetime(self._smart_eco_resume_at)
-        if resume_at is None:
-            return "Paused by manual control"
-
-        remaining = resume_at - dt_util.utcnow()
-        remaining_seconds = max(0, int(remaining.total_seconds()))
-        hours = remaining_seconds // 3600
-        minutes = (remaining_seconds % 3600) // 60
-        return f"Resuming in {hours:02d}H {minutes:02d}M"
-
     def _update_smart_eco_state(self) -> None:
         """Calculate and publish Smart Eco state label."""
         if self._load_shed:
@@ -1978,11 +1954,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         elif self._smart_eco_pause_reason == "until_manual":
             state = "Stopped by manual control"
         elif self._smart_eco_pause_reason == "manual_off_timer":
-            countdown_state = self._format_resume_countdown_state()
+            # Fixed for the whole pause. When it ends is smart_eco_resume_at,
+            # an absolute time the frontend can count down to by itself; a
+            # countdown here rewrote the state, and a recorder row, a minute.
             if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON:
-                state = f"Always ON override ({countdown_state})"
+                state = "Always ON override (Paused by manual control)"
             else:
-                state = countdown_state
+                state = "Paused by manual control"
         elif self._smart_eco_pause_reason == "manual_on_wait_idle":
             # Names the mechanism, not just the cause. This pause has no timer:
             # it ends by itself once the tank reaches target and stays idle, and
@@ -1999,28 +1977,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         self._runtime["smart_eco_state"] = state
         async_dispatcher_send(self.hass, smart_eco_state_signal(self._device_identifier), state)
-
-    def _schedule_smart_eco_countdown_tick(self) -> None:
-        """Schedule periodic countdown state refresh while waiting to resume."""
-        if self._smart_eco_pause_reason != "manual_off_timer":
-            return
-
-        if self._smart_eco_countdown_timer is not None:
-            self._smart_eco_countdown_timer()
-
-        self._smart_eco_countdown_timer = async_call_later(
-            self.hass,
-            60,
-            self._async_smart_eco_countdown_tick,
-        )
-
-    async def _async_smart_eco_countdown_tick(self, _now) -> None:
-        """Refresh countdown state and reschedule while timer is active."""
-        self._smart_eco_countdown_timer = None
-        self._update_smart_eco_state()
-        self.async_write_ha_state()
-        if self._smart_eco_pause_reason == "manual_off_timer":
-            self._schedule_smart_eco_countdown_tick()
 
     async def _async_resume_smart_eco_from_timer(self, _now) -> None:
         """Resume Smart Eco when the manual OFF delay expires."""

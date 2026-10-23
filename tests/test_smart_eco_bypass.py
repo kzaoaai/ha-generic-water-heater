@@ -57,7 +57,7 @@ async def test_turning_the_tank_off_takes_the_timed_path_instead(hass, world):  
     attrs = hass.states.get(UPSTAIRS).attributes
     assert attrs["smart_eco_pause_reason"] == "manual_off_timer"
     assert attrs["smart_eco_resume_at"] is not None
-    assert attrs["smart_eco_state"].startswith("Resuming in"), (
+    assert attrs["smart_eco_state"] == "Paused by manual control", (
         f"timed pause reported {attrs['smart_eco_state']!r}"
     )
 
