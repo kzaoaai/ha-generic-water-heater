@@ -473,7 +473,11 @@ Before 3.0.0 these were the attributes `days_since_disinfection` and `hold_progr
   above 61 °C is extrapolated.
 - **Every interval is credited at the lower of its two endpoint temperatures**, so a brief spike
   between two widely spaced samples cannot claim the whole gap. Gaps longer than 30 minutes are
-  treated as unobserved rather than as held temperature.
+  treated as unobserved rather than as held temperature, with one exception toward a disinfection
+  hold: a gap of up to 2 hours counts when the heater switch stayed off for all of it and the
+  readings at both ends are at or above 60 °C. With no heat source the tank can only cool, so it
+  stayed at or above 60 °C. This matters for sensors that report only when the reading changes,
+  which go quiet for long stretches while a tank sits idle and hot after a surplus boost.
 
 ### Running a disinfection cycle
 

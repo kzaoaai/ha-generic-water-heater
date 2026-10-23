@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -12,7 +12,13 @@ from homeassistant.components.sensor import (
     SensorExtraStoredData,
     SensorStateClass,
 )
-from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTime
+from homeassistant.const import (
+    CONF_NAME,
+    STATE_OFF,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfTime,
+)
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
@@ -110,6 +116,18 @@ MAX_CREDITED_GAP = timedelta(minutes=30)
 # normal sampling cadence: unobserved time is still not evidence.
 SUSTAIN_BREACH_GRACE = MAX_CREDITED_GAP
 
+# The one exception to MAX_CREDITED_GAP (4.6.0): a gap longer than it is
+# credited toward a hold when the element stayed OFF for the whole gap and the
+# readings at both ends are at or above the disinfection temperature. With no
+# heat source the tank can only cool, so it cannot have dipped below 60 C and
+# come back. Needed because a sensor that reports only on a ~0.5 C change goes
+# silent for more than half an hour while a tank sits idle above 60 C, and the
+# hold stalled there (seen 2026-10-23: 10.8 min banked, then 34+ min of
+# silence, nothing credited). Bounded, because convection after a draw can lift
+# one point of a stratified tank a little with no heat input, and the bound is
+# what limits how much time that can wrongly claim.
+MAX_ELEMENT_OFF_GAP = timedelta(hours=2)
+
 # Below this, a dip is a real event rather than a bad reading, and closes the
 # hold immediately with no grace. One degree under the sustain threshold is
 # already about double the ripple amplitude the real tanks show (a 59.6-64.2 C
@@ -123,6 +141,29 @@ STATE_UNKNOWN_RISK = "Unknown"
 STATE_LOW = "Low"
 STATE_ELEVATED = "Elevated"
 STATE_HIGH = "High"
+
+
+def _element_off_since(hass, heater_entity_id: str | None) -> Callable[[datetime], bool]:
+    """Return a check: has the heater switch been off since a given time?
+
+    Read from the switch's own state: off now, and last changed no later than
+    the time asked about. Anything else reads False - unavailable or unknown is
+    not off, and any change inside the gap (on and back off, a dropout and
+    back) moves last_changed past it. A restart resets last_changed, so a gap
+    across one is never credited this way.
+    """
+
+    def check(since: datetime) -> bool:
+        if not heater_entity_id:
+            return False
+        state = hass.states.get(heater_entity_id)
+        return (
+            state is not None
+            and state.state == STATE_OFF
+            and state.last_changed <= since
+        )
+
+    return check
 
 
 @dataclass
@@ -227,6 +268,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 runtime=hass.data.setdefault(DOMAIN, {}).setdefault(
                     entry.entry_id, {}
                 ),
+                element_off_since=_element_off_since(hass, heater_entity_id),
             )
         )
         for detail in (DaysUntilDisinfectionSensor, DisinfectionHoldProgressSensor):
@@ -560,9 +602,13 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         interval_days: int,
         device_has_name: bool = False,
         runtime: dict | None = None,
+        element_off_since: Callable[[datetime], bool] | None = None,
     ) -> None:
         """Initialize the Legionella thermal-conditions sensor."""
         self._runtime = runtime
+        # Whether the heater's element has been off, continuously, since a
+        # given time (MAX_ELEMENT_OFF_GAP). None: never, so no long gap counts.
+        self._element_off_since = element_off_since
         self._source_sensor_entity_id = source_sensor_entity_id
         self._device_identifier = device_identifier
         self._device_identifiers = device_identifiers
@@ -778,6 +824,14 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         self._history.append((timestamp, temperature))
         self._prune(timestamp)
 
+    def _element_off_throughout(self, since: datetime, elapsed: timedelta) -> bool:
+        """Whether a long gap may be credited: element off for all of it."""
+        return (
+            elapsed <= MAX_ELEMENT_OFF_GAP
+            and self._element_off_since is not None
+            and self._element_off_since(since)
+        )
+
     @callback
     def _advance_hold(self, timestamp: datetime, temperature: float) -> None:
         """Advance a hysteretic hold at the disinfection temperature."""
@@ -814,12 +868,18 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             return
 
         elapsed = timestamp - previous[0]
-        if elapsed <= timedelta(0) or elapsed > MAX_CREDITED_GAP:
+        if elapsed <= timedelta(0):
+            return
+        if elapsed > MAX_CREDITED_GAP and not self._element_off_throughout(
+            previous[0], elapsed
+        ):
             # Unobserved time is not evidence that temperature was held.
             return
 
         # Credit the interval at its lower endpoint, so thermostat ripple keeps
         # the window open without earning time it did not spend at temperature.
+        # For a long element-off gap this is also the "both ends at or above
+        # 60 C" half of MAX_ELEMENT_OFF_GAP.
         if min(previous[1], temperature) < DISINFECTION_TEMP_C:
             return
 

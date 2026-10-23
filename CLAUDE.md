@@ -338,15 +338,13 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 - The surplus boost has been seen on hardware heating on surplus and stopping at its target (the
   relay opened 87 ms after the 61 C reading). Not yet seen: the short-boost lockout firing.
-- **A boost does not bank disinfection holds on a sensor that reports only on change.** Idle at its
-  boost target, a tank cools slowly, and a sensor that reports only on a ~0.5 C step can stay silent
-  for more than `MAX_CREDITED_GAP` (30 min, `sensor.py`). `_advance_hold` credits nothing across such
-  a gap, so the hold stalls while the tank sits above 60 C (seen: progress stuck at 10.8 min with no
-  report for 34+ min). Performance does not hit this because the mechanical thermostat keeps the
-  temperature, and so the reports, moving. A possible refinement: credit a long gap when both
-  endpoints are at or above 60 C and the element was off for the whole gap (with no heat source the
-  temperature can only fall, so it cannot have dipped and come back). It needs the heater's switch
-  history in the risk sensor, and it loosens a deliberately conservative rule.
+- **Since 4.6.0 a long silent gap can count toward a disinfection hold** (`MAX_ELEMENT_OFF_GAP`,
+  `sensor.py`): up to 2 h, when the heater switch stayed off for the whole gap (`_element_off_since`:
+  off now and `last_changed` no later than the gap's start) and both readings are at or above 60 C.
+  Before it, a sensor reporting only on ~0.5 C steps went silent past `MAX_CREDITED_GAP` (30 min)
+  while a tank sat idle at its boost target, and the hold stalled (seen 2026-10-23: 10.8 min, then
+  34+ min of silence). Not yet seen completing a hold on hardware. The window, growth and kill-credit
+  sums in `_recalculate` still skip gaps over 30 min: only the hold has the exception.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,
