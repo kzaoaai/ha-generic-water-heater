@@ -323,6 +323,16 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
+- The surplus boost has been seen heating on surplus on hardware, but not yet: a boost reaching its
+  target and stopping, the short-boost lockout firing, or whether a boost band of target minus the
+  cold tolerance up to target (59-61 C with a 61 C target and 2 C tolerance) banks disinfection
+  holds. The hold closes below `DISINFECTION_SUSTAIN_C` (59, `sensor.py`), so that margin is thin.
+- `smart_eco_state` carries a relative countdown ("Resuming in 05H 59M") and is rewritten every
+  minute during a timed pause (`_schedule_smart_eco_countdown_tick`), so each paused heater writes a
+  recorder row a minute. `smart_eco_resume_at` already publishes the absolute deadline. Check every
+  consumer of `smart_eco_state` before changing its values.
+- The config flow's step description still calls `performance` "Boost" (`translations/en.json`),
+  which reads oddly beside the **Boost: Use PV Excess** switch.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,
