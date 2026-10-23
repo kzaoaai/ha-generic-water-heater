@@ -331,8 +331,6 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   minute during a timed pause (`_schedule_smart_eco_countdown_tick`), so each paused heater writes a
   recorder row a minute. `smart_eco_resume_at` already publishes the absolute deadline. Check every
   consumer of `smart_eco_state` before changing its values.
-- The config flow's step description still calls `performance` "Boost" (`translations/en.json`),
-  which reads oddly beside the **Boost: Use PV Excess** switch.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - `water_heater.py` calls `device_registry.async_update_device(...,

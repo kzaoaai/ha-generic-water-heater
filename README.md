@@ -37,7 +37,8 @@ Operation behavior:
 
 - `off`: heater stays off.
 - `electric`: follows the threshold logic above.
-- `performance` (Boost): prioritizes heating.
+- `performance`: keeps the element on regardless of the target temperature, until the tank's own mechanical
+  thermostat stops it. It never reports `idle`. Not the same as the surplus boost below.
 - Smart Eco Mode: applies policy behavior described below.
 
 ### Sensor glitch filtering

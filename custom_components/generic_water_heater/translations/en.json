@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Generic Water Heater Setup",
-        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Creates a virtual water heater that controls a switch using a temperature sensor.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance: keeps the element on regardless of the target, until the tank's own thermostat stops it.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
@@ -127,7 +127,7 @@
     "step": {
       "init": {
         "title": "Generic Water Heater Options",
-        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance (Boost): prioritizes heating.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
+        "description": "Updates how the virtual water heater behaves.\n\nModes:\n- electric: heats normally using target temperature and tolerances.\n- performance: keeps the element on regardless of the target, until the tank's own thermostat stops it.\n\nSmart Eco is controlled with a dedicated select entity and uses the surplus and utility entities below (and an optional template) as the allow/block condition for heating.\n\nEnable Debug Logging to capture detailed decision paths and state transitions in Home Assistant logs.",
         "data": {
           "name": "Name",
           "heater_switch": "Heater Switch",
