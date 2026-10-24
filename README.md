@@ -33,6 +33,9 @@ Example with target `50°C`, cold tolerance `0.5°C`, and hot tolerance `0.5°C`
 - Heater turns on at `49.5°C` or lower.
 - Heater turns off at `50.5°C` or higher.
 
+While the surplus boost is active (below), the boost target takes the place of the target, and
+the heater turns off at exactly the boost target: the hot tolerance is not added.
+
 Operation behavior:
 
 - `off`: heater stays off.
@@ -103,7 +106,7 @@ diagnostics and anything reading the entry see no sections.
 
 ## Fleet Load Coordination
 
-Several instances driven by one shared condition -- the same Smart Eco template, for example -- all
+Several instances driven by one shared condition -- the same Smart Eco surplus entity, for example -- all
 react in the same Home Assistant event-loop pass. Without coordination each one commands its switch
 within milliseconds of its siblings, and a few kW of resistive load arrives as a single step. On an
 inverter or generator sized close to the house load, that step is what trips the supply.
@@ -246,9 +249,32 @@ the peak. The cold tolerance still decides when it starts again. The boost targe
   boost is not tried again for 30 minutes (`surplus_boost_locked_until`). Heating to the normal
   target is never locked out.
 
+### Optional template
+
+The template is an extra term, OR'd with the two entities, for conditions they cannot express.
+A single entity in a given state is better set as the surplus or utility entity: those are what
+the boost and the **Eco: Use Utility** switch work from, and a template cannot tell the heater
+which kind of power it is. Examples of what a template is for:
+
+```jinja
+{{ states('sensor.grid_price_level') in ['low', 'very_low'] }}
+```
+
+```jinja
+{{ states('sensor.pv_generation_w') | float(0) > 3000 }}
+```
+
+```jinja
+{{ is_state('input_boolean.allow_eco_heating', 'on') }}
+```
+
+Whatever allows heating, while the policy is enforcing and the whole eco condition is false,
+heating is blocked even if the target would otherwise ask for heat.
+
 ### After a Home Assistant restart
 
-At startup the eco template's source entities may not have loaded yet, and a sensor with a delay
+At startup the eco inputs (the surplus and utility entities, or the template's sources) may not
+have loaded yet, and a sensor with a delay
 reads a plausible `off` until the delay passes. Such a condition can't be evaluated yet; it isn't
 false. So for 2 minutes after Home Assistant finishes starting, a **false** condition doesn't park
 the tank. The heater keeps the mode it had before the restart and controls to target as before,
@@ -266,7 +292,7 @@ Assistant is running gets no window, because its sources are already loaded.
 Under `Auto Resume after Delay` there is a **one-shot bypass**, and it is the plain **ON** button
 (`water_heater.turn_on`) rather than anything in the Smart Eco Mode select. It behaves differently
 from every other manual action: instead of the timed pause, Smart Eco pauses with **no deadline**,
-the tank heats on `electric` regardless of the template, and the policy **resumes by itself** once
+the tank heats on `electric` regardless of the eco condition, and the policy **resumes by itself** once
 the tank has reached target and stayed idle for a minute. The Smart Eco State sensor reads
 `Paused until the tank is satisfied` while that is in effect.
 
@@ -335,26 +361,6 @@ Until 4.6.0 the label was a `Resuming in HH MM` countdown, refreshed every minut
 heater's state and the Smart Eco State sensor's, and so added two recorder rows a minute per paused
 heater for as long as the pause lasted. A template that matched that text should test
 `smart_eco_pause_reason == "manual_off_timer"` instead, which is unchanged.
-
-Examples:
-
-```jinja
-{{ is_state('binary_sensor.solar_surplus', 'on') }}
-```
-
-```jinja
-{{ states('sensor.grid_price_level') in ['low', 'very_low'] }}
-```
-
-```jinja
-{{ states('sensor.pv_generation_w') | float(0) > 3000 }}
-```
-
-```jinja
-{{ is_state('input_boolean.allow_eco_heating', 'on') }}
-```
-
-If Smart Eco policy is active and the template evaluates to false, heating is blocked even if the target would otherwise request heat.
 
 ## Hot Water In Use
 
