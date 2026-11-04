@@ -356,3 +356,25 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   `async_remove_device` / `new_config_entry_id`.
 - `manifest.json` `issue_tracker` points at `ha_generic_water_heater` (underscores); the repo is
   `ha-generic-water-heater`, so the link is broken. Same for `documentation`, which points at core.
+
+## Cloud and web sessions
+
+A session that runs in a cloud sandbox (Claude Code on the web, a scheduled routine, an `ultra`
+review) does not load the maintainer's global instructions and cannot reach the lab: no LAN or
+tailnet route, no memory notes, no vault. These rules stand in for the global ones there. All
+but the branch rule bind local sessions too.
+
+- **No AI attribution** in commit messages, PR bodies or comments: no `Co-Authored-By: Claude`
+  trailer, no "Generated with Claude Code" footer. This overrides the harness's own attribution
+  reminder.
+- **In the cloud, work on a branch and open a draft PR. Never push to `main`, never merge.** The
+  maintainer validates on real hardware before anything lands.
+- **Sanitize before the first push.** Grep the diff, any new fixtures and the commit messages for
+  private and tailnet addresses (`192.168.`, `10.x.x.x`, `172.16-31.`, `100.64-127.`), `.home`,
+  `.lan`, `ts.net`, MAC addresses, and anything that looks like a real hostname, domain, SSID or
+  person's name. Use `192.0.2.x` / `198.51.100.x`, `aa:bb:cc:dd:ee:NN` and generic names. A
+  force-push does not take a leak back: GitHub keeps the old commit reachable.
+- **PR bodies and comments: one paragraph per line.** GitHub renders a single newline as a line
+  break, so hard-wrapped prose arrives broken mid-sentence.
+- **Nothing can be deployed or tested live from the cloud.** Skip deploy steps, and say in the PR
+  what still needs checking on a real install.
