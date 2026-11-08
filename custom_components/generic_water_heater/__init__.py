@@ -72,6 +72,15 @@ CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR = "enable_max_temp_history_sensor"
 CONF_ENABLE_LEGIONELLA_SENSOR = "enable_legionella_sensor"
 CONF_LEGIONELLA_INTERVAL_DAYS = "legionella_interval_days"
 CONF_SMART_ECO_MANUAL_OFF_RESUME_HOURS = "smart_eco_manual_off_resume_hours"
+# Optional extras (4.6.3). Each can be switched off from the options form;
+# saving reloads the entry, no restart.
+CONF_ENABLE_ELEMENT_FAULT = "enable_element_fault"
+CONF_ENABLE_HEAT_UP_RATE = "enable_heat_up_rate"
+CONF_ENABLE_ENERGY_SPLIT = "enable_energy_split"
+CONF_ENABLE_FORECAST_PREHEAT = "enable_forecast_preheat"
+CONF_FORECAST_ENTITY = "forecast_entity"
+CONF_FORECAST_MIN_KWH = "forecast_min_kwh"
+CONF_FORECAST_PREHEAT_TARGET = "forecast_preheat_target_temperature"
 
 SERVICE_SHED = "shed"
 SERVICE_RELEASE = "release"
@@ -202,6 +211,24 @@ def name_heater_entity(
         entity._attr_has_entity_name = False
     if name:
         entity.entity_id = f"{domain}.{slugify(f'{name} {label}')}"
+
+
+def remove_switched_off_entities(
+    hass: HomeAssistant, entry_id: str, domain: str, unique_ids: list[str]
+) -> None:
+    """Drop the registry entries of an extra that was switched off.
+
+    Without this a switched-off sensor stays listed as "no longer provided"
+    for good. Its entity_id is suggested from the heater's name, so switching
+    it back on brings the same id back.
+    """
+    registry = er.async_get(hass)
+    for unique_id in unique_ids:
+        entity_id = registry.async_get_entity_id(domain, DOMAIN, unique_id)
+        if entity_id is not None:
+            entry = registry.async_get(entity_id)
+            if entry is not None and entry.config_entry_id == entry_id:
+                registry.async_remove(entity_id)
 
 
 def async_resolve_heater_device(

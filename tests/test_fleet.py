@@ -290,3 +290,44 @@ def test_a_stale_anchor_carried_through_a_reload_does_not_block_for_ever():
     fleet.register(UPSTAIRS, "Upstairs Water Heater", stagger_seconds=60)
 
     assert fleet.request_turn_on(DOWNSTAIRS, at(500)).admitted
+
+
+# ---------------------------------------------------------------------------
+# Edge cases (4.6.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_sibling_mid_reload_still_spaces_the_other():
+    """An options save unregisters a heater for about a second.
+
+    Upstairs started 10 s ago; downstairs asking during the reload used to see
+    no sibling at all and step straight on.
+    """
+    fleet = build_fleet()
+    assert fleet.request_turn_on(UPSTAIRS, at(0)).admitted
+    fleet.unregister(UPSTAIRS, at(10))
+
+    decision = fleet.request_turn_on(DOWNSTAIRS, at(10.5))
+
+    assert not decision.admitted
+    assert decision.retry_after == pytest.approx(49.5)
+
+
+def test_a_departed_anchor_past_its_window_does_not_hold_anyone():
+    fleet = build_fleet()
+    fleet.request_turn_on(UPSTAIRS, at(0))
+    fleet.unregister(UPSTAIRS, at(10))
+
+    assert fleet.request_turn_on(DOWNSTAIRS, at(61)).admitted
+
+
+def test_a_clock_stepping_back_costs_one_stagger_not_the_step():
+    """Upstairs started at T; the clock then stepped back an hour."""
+    fleet = build_fleet()
+    assert fleet.request_turn_on(UPSTAIRS, at(0)).admitted
+
+    decision = fleet.request_turn_on(DOWNSTAIRS, at(-3600))
+
+    assert not decision.admitted
+    assert decision.retry_after == pytest.approx(DEFAULT_STAGGER_SECONDS)
+    assert fleet.request_turn_on(DOWNSTAIRS, at(-3600 + 60)).admitted

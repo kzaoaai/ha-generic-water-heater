@@ -360,7 +360,7 @@ Where a test cannot distinguish two redundant guards, or cannot reach a path at 
 says so. This is deliberate and load-bearing: a test name that implies a guarantee it does not give
 is worse than a missing test, because it stops the next person looking. Existing examples:
 
-- The three `water_heater.py` call sites that feed observed switch state to the fleet are **not
+- The three call sites (now in `water_heater_switch.py` and `water_heater.py`) that feed observed switch state to the fleet are **not
   pinned**. Removing all three leaves the suite green, because a heater that is drawing normally
   anchors itself through its own request. What they buy is the in-pass ordering race, which is
   sub-millisecond and not stageable from a test that awaits `async_block_till_done`. Three tests that
@@ -394,7 +394,12 @@ options form.
 
 | File | Holds |
 | --- | --- |
-| `water_heater.py` | the entity, the control loop, Smart Eco, disinfection, load-shed services |
+| `water_heater.py` | setup, the entity class (restore, properties, service entry points); its behaviour lives in the mixins below |
+| `water_heater_switch.py` | the control loop, switch commands, cooldown, fleet admission, failsafe and outage timers, load shed |
+| `water_heater_eco.py` | Smart Eco: eco condition, pause/resume, off-until-target |
+| `water_heater_disinfection.py` | disinfection cycles: start, end, give-up |
+| `water_heater_surplus.py` | surplus boost, forecast pre-heat, the heating goal |
+| `water_heater_const.py` | timings and constants the mixins share (re-exported from `water_heater.py`) |
 | `fleet.py` | switch-on staggering; pure logic, imports nothing from Home Assistant |
 | `config_flow.py` | sectioned config/options forms, flat storage |
 | `sensor.py` | Smart Eco state, legionella risk, max-temp history, Disinfection Due In, Disinfection Hold Progress, Power (mirror) |
@@ -404,11 +409,15 @@ options form.
 | `switch.py` | Eco: Use Utility and Boost: Use PV Excess, views onto the water heater |
 | `binary_sensor.py` | Hot Water In Use draw detector; Element Fault |
 | `element_health.py` | Element Fault's decision (meter vs relay); pure logic, no Home Assistant imports |
+| `heat_rate.py` | heat-up rate learning and the Ready At estimate; pure logic |
+| `energy_split.py` | today's element energy per source; pure logic |
+| `insights.py` | the Heat-up Rate, Ready At and Energy Today entities (plumbing for the two above) |
 | `diagnostics.py` | config-entry diagnostics: options, fleet member, heater internals, timers |
 
 `fleet.py` is deliberately Home-Assistant-free and driven by an injected `now`, so its decisions can
 be unit tested without an event loop. Keep new decision logic there and the plumbing in
-`water_heater.py`.
+the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py` and `element_health.py` follow
+the same pattern.
 
 ---
 
@@ -433,6 +442,19 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   while a tank sat idle at its boost target, and the hold stalled (seen 2026-10-23: 10.8 min, then
   34+ min of silence). Not yet seen completing a hold on hardware. The window, growth and kill-credit
   sums in `_recalculate` still skip gaps over 30 min: only the hold has the exception.
+- 4.6.3's insights and forecast pre-heat are new and unproven on hardware:
+  - Heat-up Rate learns only from runs of 10+ minutes that rise 1+ C, with a 0.3 moving average.
+    "Drawing" is the meter at 100 W or more, or the switch on when there is no meter. A shower
+    mid-run reads slow; the average absorbs it rather than rejecting the run.
+  - Energy Today credits each interval at the power and source at its start, flushes a steady
+    draw every minute, and credits nothing across a gap over 10 min (a restart).
+  - Forecast pre-heat raises the boost target, so everything the boost obeys (surplus only, the
+    Boost switch, the short-run lockout, electric only) bounds it too.
+  - Switching an insight off deletes its registry entries (`remove_switched_off_entities`);
+    switching it back on brings the same entity ids back, without any customisation.
+- The heater shows unavailable only after its switch has been away for
+  `SWITCH_UNAVAILABLE_AFTER` (2 min). Inside that window it keeps controlling: commands to an
+  unavailable switch fail and the next pass retries. The outage repair is still at 10 min.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 

@@ -30,6 +30,8 @@ import homeassistant.util.dt as dt_util
 
 from . import (
     name_heater_entity,
+    remove_switched_off_entities,
+    CONF_ENABLE_ELEMENT_FAULT,
     CONF_POWER_SENSOR,
     CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_HEATER,
@@ -123,7 +125,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Element Fault needs a meter, and never one of our own mirrors.
     power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
-    if power_sensor is not None and data.get(CONF_HEATER):
+    if not data.get(CONF_ENABLE_ELEMENT_FAULT, True):
+        remove_switched_off_entities(
+            hass,
+            entry.entry_id,
+            "binary_sensor",
+            [ElementFaultBinarySensor.unique_id_for(entry.entry_id)],
+        )
+    elif power_sensor is not None and data.get(CONF_HEATER):
         source = er.async_get(hass).async_get(power_sensor)
         if source is None or source.platform != DOMAIN:
             entities.append(
@@ -156,6 +165,10 @@ class ElementFaultBinarySensor(BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
+    @staticmethod
+    def unique_id_for(entry_id: str) -> str:
+        return f"{DOMAIN}_{entry_id}_element_fault"
+
     def __init__(
         self,
         name: str | None,
@@ -171,7 +184,7 @@ class ElementFaultBinarySensor(BinarySensorEntity):
         self._power_sensor = power_sensor
         self._runtime = runtime
         self._device_identifiers = device_identifiers
-        self._attr_unique_id = f"{DOMAIN}_{entry_id}_element_fault"
+        self._attr_unique_id = self.unique_id_for(entry_id)
         self._attr_is_on = False
         self._pending: str | None = None
         self._pending_since: datetime | None = None

@@ -10,6 +10,13 @@ from homeassistant.helpers.selector import selector
 
 from . import (
     CONF_COLD_TOLERANCE,
+    CONF_ENABLE_ELEMENT_FAULT,
+    CONF_ENABLE_ENERGY_SPLIT,
+    CONF_ENABLE_FORECAST_PREHEAT,
+    CONF_ENABLE_HEAT_UP_RATE,
+    CONF_FORECAST_ENTITY,
+    CONF_FORECAST_MIN_KWH,
+    CONF_FORECAST_PREHEAT_TARGET,
     CONF_DEBUG_LOGGING,
     CONF_ECO_TEMPLATE,
     CONF_ENABLE_HOT_WATER_IN_USE,
@@ -90,6 +97,17 @@ SECTIONS: dict[str, tuple[str, ...]] = {
     ),
     "hot_water_in_use": (CONF_ENABLE_HOT_WATER_IN_USE, CONF_WATER_IN_USE_ENTITY),
     "metering": (CONF_POWER_SENSOR,),
+    "insights": (
+        CONF_ENABLE_ELEMENT_FAULT,
+        CONF_ENABLE_HEAT_UP_RATE,
+        CONF_ENABLE_ENERGY_SPLIT,
+    ),
+    "forecast_preheat": (
+        CONF_ENABLE_FORECAST_PREHEAT,
+        CONF_FORECAST_ENTITY,
+        CONF_FORECAST_MIN_KWH,
+        CONF_FORECAST_PREHEAT_TARGET,
+    ),
     "advanced": (CONF_DEBUG_LOGGING,),
 }
 
@@ -227,6 +245,45 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                 ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
             }),
 
+            # On by default: they only report. Element Fault and the energy
+            # split also need the power sensor above.
+            vol.Required("insights"): _section("insights", {
+                vol.Optional(
+                    CONF_ENABLE_ELEMENT_FAULT,
+                    default=current.get(CONF_ENABLE_ELEMENT_FAULT, True),
+                ): selector({"boolean": {}}),
+                vol.Optional(
+                    CONF_ENABLE_HEAT_UP_RATE,
+                    default=current.get(CONF_ENABLE_HEAT_UP_RATE, True),
+                ): selector({"boolean": {}}),
+                vol.Optional(
+                    CONF_ENABLE_ENERGY_SPLIT,
+                    default=current.get(CONF_ENABLE_ENERGY_SPLIT, True),
+                ): selector({"boolean": {}}),
+            }),
+
+            # Off by default: it changes what the heater does, and needs a
+            # forecast entity. Like the boost target, no number defaults that
+            # would read as chosen.
+            vol.Required("forecast_preheat"): _section("forecast_preheat", {
+                vol.Optional(
+                    CONF_ENABLE_FORECAST_PREHEAT,
+                    default=current.get(CONF_ENABLE_FORECAST_PREHEAT, False),
+                ): selector({"boolean": {}}),
+                vol.Optional(
+                    CONF_FORECAST_ENTITY,
+                    description={"suggested_value": current.get(CONF_FORECAST_ENTITY) or None},
+                ): selector({"entity": {"domain": "sensor"}}),
+                vol.Optional(
+                    CONF_FORECAST_MIN_KWH,
+                    description={"suggested_value": current.get(CONF_FORECAST_MIN_KWH)},
+                ): selector({"number": {"min": 0, "max": 1000, "step": 0.5, "mode": "box", "unit_of_measurement": "kWh"}}),
+                vol.Optional(
+                    CONF_FORECAST_PREHEAT_TARGET,
+                    description={"suggested_value": current.get(CONF_FORECAST_PREHEAT_TARGET)},
+                ): selector({"number": {"min": 0, "max": 100, "step": 0.5, "mode": "box"}}),
+            }),
+
             vol.Required("advanced"): _section("advanced", {
                 vol.Optional(
                     CONF_DEBUG_LOGGING,
@@ -292,6 +349,21 @@ def _surplus_boost_errors(flat: dict) -> dict:
     return {}
 
 
+def _forecast_preheat_errors(flat: dict) -> dict:
+    """Refuse a pre-heat that could never act, as for the boost."""
+    if not flat.get(CONF_ENABLE_FORECAST_PREHEAT):
+        return {}
+    if not (flat.get(CONF_SURPLUS_ENTITY) or "").strip():
+        return {"base": "surplus_boost_needs_surplus_entity"}
+    if (
+        not (flat.get(CONF_FORECAST_ENTITY) or "").strip()
+        or flat.get(CONF_FORECAST_MIN_KWH) in (None, "")
+        or flat.get(CONF_FORECAST_PREHEAT_TARGET) in (None, "")
+    ):
+        return {"base": "forecast_preheat_incomplete"}
+    return {}
+
+
 def _apply_cleared_and_defaults(user_input: dict) -> dict:
     """Flatten, then persist cleared optional fields as empty rather than absent.
 
@@ -315,6 +387,13 @@ def _apply_cleared_and_defaults(user_input: dict) -> dict:
     flat.setdefault(CONF_LEGIONELLA_INTERVAL_DAYS, 7)
     flat.setdefault(CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR, False)
     flat.setdefault(CONF_ENABLE_HOT_WATER_IN_USE, False)
+    flat.setdefault(CONF_ENABLE_ELEMENT_FAULT, True)
+    flat.setdefault(CONF_ENABLE_HEAT_UP_RATE, True)
+    flat.setdefault(CONF_ENABLE_ENERGY_SPLIT, True)
+    flat.setdefault(CONF_ENABLE_FORECAST_PREHEAT, False)
+    flat.setdefault(CONF_FORECAST_ENTITY, "")
+    flat.setdefault(CONF_FORECAST_MIN_KWH, None)
+    flat.setdefault(CONF_FORECAST_PREHEAT_TARGET, None)
     return flat
 
 
@@ -338,6 +417,7 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _heater_in_use_errors(self.hass, flat)
                 or _power_sensor_errors(self.hass, flat)
                 or _surplus_boost_errors(flat)
+                or _forecast_preheat_errors(flat)
             )
             if not errors:
                 return self.async_create_entry(title=flat[CONF_NAME], data=flat)
@@ -360,6 +440,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 _heater_in_use_errors(self.hass, flat, self.config_entry.entry_id)
                 or _power_sensor_errors(self.hass, flat)
                 or _surplus_boost_errors(flat)
+                or _forecast_preheat_errors(flat)
             )
             if not errors:
                 return self.async_create_entry(title="", data=flat)

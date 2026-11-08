@@ -122,6 +122,8 @@ async def test_the_options_form_refuses_a_mirror_and_keeps_the_entry(hass, world
         "legionella": {},
         "hot_water_in_use": {},
         "metering": {"power_sensor": MIRROR},
+        "insights": {},
+        "forecast_preheat": {},
         "advanced": {},
     }
     result = await hass.config_entries.options.async_configure(
@@ -154,3 +156,18 @@ def test_both_naming_paths_end_in_mirror():
     bare = ElementPowerSensor(None, "e", "Upstairs", METER, None, False)
     assert named.has_entity_name and slugify(f"Upstairs Water Heater {named.name}").endswith("_power_mirror")
     assert not bare.has_entity_name and slugify(bare.name).endswith("_power_mirror")
+
+
+async def test_the_mirror_skips_steps_under_five_watts(hass, world):
+    _meter(hass, "1500")
+    await _setup(hass, power_sensor=METER)
+    for value in ("1502", "1504", "1503.5"):
+        _meter(hass, value)
+        await hass.async_block_till_done()
+        assert float(hass.states.get(MIRROR).state) == 1500
+    _meter(hass, "1505.5")  # measured from what is shown, not the last report
+    await hass.async_block_till_done()
+    assert float(hass.states.get(MIRROR).state) == 1505.5
+    _meter(hass, "0")
+    await hass.async_block_till_done()
+    assert float(hass.states.get(MIRROR).state) == 0

@@ -34,6 +34,14 @@ from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
+    CONF_ENABLE_ENERGY_SPLIT,
+    CONF_ENABLE_HEAT_UP_RATE,
+    CONF_SURPLUS_ENTITY,
+    CONF_SURPLUS_STATE,
+    CONF_UTILITY_ENTITY,
+    CONF_UTILITY_STATE,
+    DEFAULT_ACTIVE_STATE,
+    remove_switched_off_entities,
     name_heater_entity,
     eco_condition_configured,
     CONF_POWER_SENSOR,
@@ -48,6 +56,16 @@ from . import (
     smart_eco_state_signal,
 )
 from .temperature_tracking import async_track_filtered_temperature
+from .element_health import to_watts
+from .energy_split import SOURCES
+from .insights import (
+    EnergySplitTracker,
+    EnergyTodaySensor,
+    HeatUpRateSensor,
+    ReadyAtSensor,
+    energy_split_unique_ids,
+    heat_rate_unique_ids,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _WINDOW = timedelta(days=7)
@@ -399,6 +417,49 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
     power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
+    meter = power_sensor
+    if meter is not None:
+        source = er.async_get(hass).async_get(meter)
+        if source is not None and source.platform == DOMAIN:
+            meter = None
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+
+    if data.get(CONF_ENABLE_HEAT_UP_RATE, True) and heater_entity_id and source_sensor_entity_id:
+        entities.append(
+            HeatUpRateSensor(
+                hass, entry.entry_id, name, heater_entity_id, source_sensor_entity_id,
+                meter, runtime, device_identifiers, device_has_name,
+            )
+        )
+        entities.append(
+            ReadyAtSensor(hass, entry.entry_id, name, runtime, device_identifiers, device_has_name)
+        )
+    else:
+        remove_switched_off_entities(hass, entry.entry_id, "sensor", heat_rate_unique_ids(entry.entry_id))
+
+    if data.get(CONF_ENABLE_ENERGY_SPLIT, True) and meter is not None:
+        tracker = EnergySplitTracker(
+            hass,
+            meter,
+            (
+                (data.get(CONF_SURPLUS_ENTITY) or "").strip() or None,
+                data.get(CONF_SURPLUS_STATE) or DEFAULT_ACTIVE_STATE,
+            ),
+            (
+                (data.get(CONF_UTILITY_ENTITY) or "").strip() or None,
+                data.get(CONF_UTILITY_STATE) or DEFAULT_ACTIVE_STATE,
+            ),
+        )
+        for split_source in SOURCES:
+            entities.append(
+                EnergyTodaySensor(
+                    hass, entry.entry_id, name, split_source, tracker,
+                    device_identifiers, device_has_name,
+                )
+            )
+    elif not data.get(CONF_ENABLE_ENERGY_SPLIT, True):
+        remove_switched_off_entities(hass, entry.entry_id, "sensor", energy_split_unique_ids(entry.entry_id))
+
     if power_sensor is not None:
         source = er.async_get(hass).async_get(power_sensor)
         # Never mirror a mirror (config_flow._power_sensor_errors refuses one
@@ -1322,6 +1383,24 @@ class DisinfectionHoldProgressSensor(_LegionellaDetailSensor):
         return self._runtime.get("legionella_hold_progress_minutes")
 
 
+# The mirror skips updates smaller than this. Meters report every few watts of
+# standby noise and voltage drift, and each report was a state write and a
+# recorder row on a sensor nothing reads for control. An element switching on
+# or off moves it by a kilowatt or more.
+MIRROR_DEADBAND_W = 5.0
+
+
+def _within_deadband(shown, mirror) -> bool:
+    available, value, unit = shown
+    if not (available and mirror._attr_available) or unit != mirror._attr_native_unit_of_measurement:
+        return False
+    if value is None or mirror._attr_native_value is None:
+        return False
+    return abs(
+        to_watts(mirror._attr_native_value, unit) - to_watts(value, unit)
+    ) < MIRROR_DEADBAND_W
+
+
 class ElementPowerSensor(SensorEntity):
     """The element's draw, mirrored from its configured meter onto this device.
 
@@ -1390,7 +1469,17 @@ class ElementPowerSensor(SensorEntity):
 
     @callback
     def _async_source_changed(self, event) -> None:
+        shown = (
+            self._attr_available,
+            self._attr_native_value,
+            self._attr_native_unit_of_measurement,
+        )
         self._mirror(event.data.get("new_state"))
+        if _within_deadband(shown, self):
+            # Keep showing what was written, so small steps cannot add up
+            # unseen: the next write is measured from the shown value.
+            self._attr_native_value = shown[1]
+            return
         self.async_write_ha_state()
 
     def _mirror(self, state) -> None:

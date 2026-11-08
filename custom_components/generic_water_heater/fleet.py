@@ -236,18 +236,39 @@ class HeaterFleet:
             return ADMIT
 
         siblings = [m for m in self._members.values() if m.entry_id != entry_id]
-        if not siblings:
+        # A sibling mid-reload (an options save) is briefly unregistered, but
+        # its element may have started seconds ago. Its stashed anchor still
+        # counts, or a heater asking during that second steps straight on.
+        departed = [
+            anchor
+            for key, anchor in self._departed.items()
+            if key != entry_id and anchor.expires_at > now
+        ]
+        if not siblings and not departed:
             # Single-heater install: nothing to space against.
             self._admit(member, now)
             return ADMIT
 
         stagger = self.stagger_seconds
         last_sibling_on = max(
-            (m.last_admitted for m in siblings if m.last_admitted is not None),
+            [m.last_admitted for m in siblings if m.last_admitted is not None]
+            + [anchor.last_admitted for anchor in departed],
             default=None,
         )
         if stagger > 0 and last_sibling_on is not None:
             elapsed = (now - last_sibling_on).total_seconds()
+            if elapsed < 0:
+                # The clock stepped back past the sibling's start (an NTP
+                # correction, a restored VM). Measured as is, the wait would
+                # be the whole step on top of the stagger. Count the window
+                # from now instead: one stagger, not an hour.
+                for sibling in siblings:
+                    if sibling.last_admitted is not None and sibling.last_admitted > now:
+                        sibling.last_admitted = now
+                for anchor in departed:
+                    if anchor.last_admitted > now:
+                        anchor.last_admitted = now
+                elapsed = 0.0
             if elapsed < stagger:
                 retry_after = stagger - elapsed
                 reason = (

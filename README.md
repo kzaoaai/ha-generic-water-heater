@@ -32,6 +32,18 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   relay disagree -- drawing power while switched off (3 min), or switched on with the tank well
   below any thermostat cutout but drawing nothing (10 min). Read-only: it never switches anything.
   The `fault` attribute says which.
+- **Insights**, each switchable off in the options (saving reloads the heater, no restart):
+  - **Heat-up Rate** (C per hour), learned from the tank's own heating runs, and **Ready At**: when
+    the tank should reach what it is heading for (its target, the boost target while boosting, or
+    60 C in a disinfection cycle). Unknown while the element is not drawing.
+  - **Energy Today (Surplus / Utility / Other)** (with a `power_sensor`): today's element energy by
+    what was carrying the house -- surplus active, else the utility, else anything else (battery,
+    generator). An attribution from the Smart Eco inputs, not a measurement. Resets at midnight.
+  - **Element Fault**, above.
+- **Forecast pre-heat** (off by default): while surplus is active and tomorrow's solar forecast is
+  below a threshold, the surplus boost aims at a higher pre-heat target, storing heat for the poor
+  day. The **Boost** switch turns it off with the boost.
+- A switch that drops off the network for under 2 minutes no longer shows the heater unavailable.
 - Diagnostics download (the integration's device or entry menu) with options, fleet state and the
   heater's internal state.
 - Automatic device linking to the same device as the controlled switch when possible.
@@ -89,7 +101,8 @@ This integration is configured from the Home Assistant UI.
 ## Configuration Options
 
 The config flow groups these into collapsible sections — temperatures, cycle protection, Smart
-Eco, surplus boost, fleet, legionella, hot water in use, metering, advanced — with the name, switch and sensor left at the
+Eco, surplus boost, fleet, legionella, hot water in use, metering, insights, forecast pre-heat,
+advanced — with the name, switch and sensor left at the
 top. The grouping is presentation only: options are stored flat under the keys below, so YAML,
 diagnostics and anything reading the entry see no sections.
 
@@ -118,6 +131,13 @@ diagnostics and anything reading the entry see no sections.
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
 | `power_sensor` | entity_id | empty | Optional meter on the element's circuit. Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. |
+| `enable_element_fault` | boolean | `true` | The Element Fault sensor. Needs `power_sensor`. |
+| `enable_heat_up_rate` | boolean | `true` | The Heat-up Rate and Ready At sensors. |
+| `enable_energy_split` | boolean | `true` | The three Energy Today sensors. Needs `power_sensor`. |
+| `enable_forecast_preheat` | boolean | `false` | Forecast pre-heat. Needs `surplus_entity` and the three below. |
+| `forecast_entity` | entity_id | empty | Tomorrow's expected solar production, in kWh (Wh and MWh are converted). Forecast.Solar's "Estimated energy production - tomorrow" is one. Unreadable means no pre-heat. |
+| `forecast_min_kwh` | number | empty | Below this, tomorrow counts as poor. |
+| `forecast_preheat_target_temperature` | number | empty | The boost target on the day before a poor one, when higher than `surplus_boost_target_temperature`. With a boost target of 61, a pre-heat target of 61 changes nothing: either lower the everyday boost target or raise this. |
 
 ## Fleet Load Coordination
 

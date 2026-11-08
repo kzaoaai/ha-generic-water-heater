@@ -105,6 +105,36 @@
               "power_sensor": "A sensor measuring what this element draws. Published as the heater's power_sensor attribute, so other integrations (a battery runtime estimate, for instance) can follow the heater's live draw without being configured with the meter themselves."
             }
           },
+          "insights": {
+            "name": "Insights",
+            "description": "Extra sensors that only report. Switch any off here; saving reloads this heater, no restart.",
+            "data": {
+              "enable_element_fault": "Element Fault",
+              "enable_heat_up_rate": "Heat-up rate and Ready At",
+              "enable_energy_split": "Energy today by source"
+            },
+            "data_description": {
+              "enable_element_fault": "Turns on when the meter and the relay disagree: drawing while the relay is off, or nothing drawn while it is on and the tank is cold. Needs the power sensor.",
+              "enable_heat_up_rate": "Learns how fast this tank warms (C per hour) from its own heating runs, and estimates when it will reach the temperature it is heading for.",
+              "enable_energy_split": "Today's element energy in three sensors: while surplus was active, while the utility was, and the rest (battery, generator). An attribution from the Smart Eco inputs, not a measurement. Needs the power sensor."
+            }
+          },
+          "forecast_preheat": {
+            "name": "Forecast pre-heat",
+            "description": "Store more heat on a sunny day when tomorrow's solar forecast is poor.",
+            "data": {
+              "enable_forecast_preheat": "Enable forecast pre-heat",
+              "forecast_entity": "Tomorrow's solar forecast",
+              "forecast_min_kwh": "Pre-heat when tomorrow is below",
+              "forecast_preheat_target_temperature": "Pre-heat target"
+            },
+            "data_description": {
+              "enable_forecast_preheat": "While surplus is active and tomorrow's forecast is below the threshold, the surplus boost aims at the pre-heat target instead of the boost target (whichever is higher). Uses surplus only, and the Surplus Boost switch turns it off with the boost.",
+              "forecast_entity": "A sensor giving tomorrow's expected production in kWh (Wh and MWh are converted), such as Forecast.Solar's 'Estimated energy production - tomorrow'.",
+              "forecast_min_kwh": "Below this, tomorrow counts as poor.",
+              "forecast_preheat_target_temperature": "How hot to store the tank on the day before a poor one. Set it above the boost target, or it changes nothing."
+            }
+          },
           "advanced": {
             "name": "Advanced",
             "description": "Diagnostics.",
@@ -121,7 +151,8 @@
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
       "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
-      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay."
+      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay.",
+      "forecast_preheat_incomplete": "Forecast pre-heat needs a forecast sensor, a threshold and a pre-heat target."
     }
   },
   "options": {
@@ -230,6 +261,36 @@
               "power_sensor": "A sensor measuring what this element draws. Published as the heater's power_sensor attribute, so other integrations (a battery runtime estimate, for instance) can follow the heater's live draw without being configured with the meter themselves."
             }
           },
+          "insights": {
+            "name": "Insights",
+            "description": "Extra sensors that only report. Switch any off here; saving reloads this heater, no restart.",
+            "data": {
+              "enable_element_fault": "Element Fault",
+              "enable_heat_up_rate": "Heat-up rate and Ready At",
+              "enable_energy_split": "Energy today by source"
+            },
+            "data_description": {
+              "enable_element_fault": "Turns on when the meter and the relay disagree: drawing while the relay is off, or nothing drawn while it is on and the tank is cold. Needs the power sensor.",
+              "enable_heat_up_rate": "Learns how fast this tank warms (C per hour) from its own heating runs, and estimates when it will reach the temperature it is heading for.",
+              "enable_energy_split": "Today's element energy in three sensors: while surplus was active, while the utility was, and the rest (battery, generator). An attribution from the Smart Eco inputs, not a measurement. Needs the power sensor."
+            }
+          },
+          "forecast_preheat": {
+            "name": "Forecast pre-heat",
+            "description": "Store more heat on a sunny day when tomorrow's solar forecast is poor.",
+            "data": {
+              "enable_forecast_preheat": "Enable forecast pre-heat",
+              "forecast_entity": "Tomorrow's solar forecast",
+              "forecast_min_kwh": "Pre-heat when tomorrow is below",
+              "forecast_preheat_target_temperature": "Pre-heat target"
+            },
+            "data_description": {
+              "enable_forecast_preheat": "While surplus is active and tomorrow's forecast is below the threshold, the surplus boost aims at the pre-heat target instead of the boost target (whichever is higher). Uses surplus only, and the Surplus Boost switch turns it off with the boost.",
+              "forecast_entity": "A sensor giving tomorrow's expected production in kWh (Wh and MWh are converted), such as Forecast.Solar's 'Estimated energy production - tomorrow'.",
+              "forecast_min_kwh": "Below this, tomorrow counts as poor.",
+              "forecast_preheat_target_temperature": "How hot to store the tank on the day before a poor one. Set it above the boost target, or it changes nothing."
+            }
+          },
           "advanced": {
             "name": "Advanced",
             "description": "Diagnostics.",
@@ -246,7 +307,8 @@
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
       "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
-      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay."
+      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay.",
+      "forecast_preheat_incomplete": "Forecast pre-heat needs a forecast sensor, a threshold and a pre-heat target."
     }
   },
   "services": {

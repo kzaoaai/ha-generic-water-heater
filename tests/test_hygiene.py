@@ -45,6 +45,8 @@ def form(name, switch):
         "legionella": {},
         "hot_water_in_use": {},
         "metering": {},
+        "insights": {},
+        "forecast_preheat": {},
         "advanced": {},
     }
 

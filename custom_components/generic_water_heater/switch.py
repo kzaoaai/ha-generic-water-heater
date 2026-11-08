@@ -17,6 +17,7 @@ from . import (
     CONF_HEATER,
     CONF_POWER_SENSOR,
     CONF_SURPLUS_BOOST_TARGET,
+    CONF_ENABLE_FORECAST_PREHEAT,
     CONF_SURPLUS_ENTITY,
     CONF_UTILITY_ENTITY,
     DOMAIN,
@@ -55,9 +56,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities = []
     if (data.get(CONF_UTILITY_ENTITY) or "").strip():
         entities.append(EcoUseUtilitySwitch(**common))
-    if (data.get(CONF_SURPLUS_ENTITY) or "").strip() and data.get(
-        CONF_SURPLUS_BOOST_TARGET
-    ) not in (None, ""):
+    # Forecast pre-heat is a boost too, so it gets the same off switch.
+    if (data.get(CONF_SURPLUS_ENTITY) or "").strip() and (
+        data.get(CONF_SURPLUS_BOOST_TARGET) not in (None, "")
+        or data.get(CONF_ENABLE_FORECAST_PREHEAT)
+    ):
         entities.append(SurplusBoostSwitch(**common))
     if entities:
         async_add_entities(entities)
