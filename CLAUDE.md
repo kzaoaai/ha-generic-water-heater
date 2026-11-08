@@ -391,6 +391,9 @@ be unit tested without an event loop. Keep new decision logic there and the plum
 
 ## Open items
 
+- `water_heater.py` serves temperatures under both the `native_*` names (read by 2026.11, where the
+  plain ones are deprecated and stop working in 2027.11) and the plain names (all 2026.10 has).
+  Drop the plain three once `hacs.json`'s minimum core is 2026.11 or later.
 - The surplus boost has been seen on hardware heating on surplus, stopping at its target (the relay
   opened 87 ms after the 61 C reading) and locking out twice in one afternoon, the element starting
   again at the exact moment a lockout ended. Weak spot seen the same afternoon: the short window is

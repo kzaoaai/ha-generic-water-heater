@@ -165,3 +165,17 @@ async def test_the_selects_history_is_used_when_the_heater_has_none(hass, world,
 
     assert entities(hass)["Upstairs"]._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON
     assert hass.states.get(SMART_ECO_SELECT).state == "Always ON"
+
+
+async def test_temperatures_are_served_under_the_native_names_too(hass, world):
+    """2026.11 reads native_*; the plain names stop working in 2027.11.
+
+    Coverage note: the suite runs on 2026.10, which reads only the plain
+    names, so this pins that both are provided and agree. That 2026.11 then
+    logs no deprecation was checked by importing the module on 2026.11.0.
+    """
+    await setup_both(hass)
+    upstairs = entities(hass)["Upstairs"]
+    assert upstairs.native_current_temperature == upstairs.current_temperature == 40.0
+    assert upstairs.native_target_temperature == upstairs.target_temperature
+    assert upstairs.native_temperature_unit == upstairs.temperature_unit

@@ -591,20 +591,42 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             return "heating"
         return "idle"
 
+    # Home Assistant 2026.11 reads temperatures through native_*; the plain
+    # names are deprecated there and stop working in 2027.11. 2026.10 (the
+    # oldest core supported, hacs.json) has only the plain names. Providing
+    # both serves each core what it reads, and on 2026.11 a class that provides
+    # the native member as well is not reported. Drop the plain three once the
+    # minimum core is 2026.11 or later.
+
     @property
-    def current_temperature(self):
+    def native_current_temperature(self):
         """Return current temperature."""
         return self._current_temperature
 
     @property
-    def temperature_unit(self):
+    def native_temperature_unit(self):
         """Return the unit of measurement."""
         return self._unit_of_measurement
 
     @property
-    def target_temperature(self):
+    def native_target_temperature(self):
         """Return the temperature we try to reach."""
         return self._target_temperature
+
+    @property
+    def current_temperature(self):
+        """Pre-2026.11 name of native_current_temperature."""
+        return self.native_current_temperature
+
+    @property
+    def temperature_unit(self):
+        """Pre-2026.11 name of native_temperature_unit."""
+        return self.native_temperature_unit
+
+    @property
+    def target_temperature(self):
+        """Pre-2026.11 name of native_target_temperature."""
+        return self.native_target_temperature
 
     @property
     def target_temperature_step(self):
