@@ -34,6 +34,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
+    name_heater_entity,
     eco_condition_configured,
     CONF_POWER_SENSOR,
     CONF_ENABLE_LEGIONELLA_SENSOR,
@@ -444,9 +445,7 @@ class SmartEcoStateSensor(SensorEntity):
 
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Smart Eco State"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "sensor", name, "Smart Eco State", device_has_name)
 
     @property
     def native_value(self):
@@ -506,9 +505,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
 
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Highest Temperature (7 days)"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "sensor", name, "Highest Temperature (7 days)", device_has_name)
 
     @property
     def device_info(self):
@@ -771,9 +768,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         # Spell the name out unless the device can supply one. Without this a
         # heater on an unnamed device produced a bare "Legionella Risk", which
         # is ambiguous the moment there is more than one tank.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Legionella Risk"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "sensor", name, "Legionella Risk", device_has_name)
 
         self._attr_unique_id = f"{DOMAIN}_{device_identifier}_legionella_risk"
 
@@ -1222,9 +1217,7 @@ class _LegionellaDetailSensor(SensorEntity):
         self._device_identifiers = device_identifiers
         self._attr_name = self._label
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{self._key}"
-        if name and not device_has_name:
-            self._attr_name = f"{name} {self._label}"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "sensor", name, self._label, device_has_name)
 
     @property
     def device_info(self):
@@ -1376,9 +1369,7 @@ class ElementPowerSensor(SensorEntity):
         self._attr_extra_state_attributes = {"mirror_of": source_entity_id}
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Power (mirror)"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "sensor", name, "Power (mirror)", device_has_name)
 
     @property
     def device_info(self):

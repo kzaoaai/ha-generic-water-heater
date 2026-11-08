@@ -279,6 +279,24 @@ the one test of the pre-2026.9 guard skips; that one needs an older core.
 a link 4.3.x recorded in the `generic_water_heater.meter_links` Store, only if it is unchanged
 since, and drops the record.
 
+### New entities are named from the heater, never the device
+
+`name_heater_entity` (`__init__.py`) names every helper entity and suggests its entity_id as
+`<heater name> <label>`. Home Assistant otherwise builds a has_entity_name entity's id from the
+DEVICE name, and devices get renamed: Disinfection Due, new in 4.6.1, came out
+`sensor.<renamed device>_disinfection_due` beside siblings fixed years earlier as
+`sensor.upstairs_...`. A suggestion only applies to a new registry entry, so existing ids never
+move. Any new entity goes through it.
+
+### Lasting outages and a give-up are repairs, not notifications
+
+The temperature sensor or the heater switch unavailable for `OUTAGE_REPAIR_AFTER` (10 min) raises a
+repair that clears itself on return; a disinfection give-up raises one that clears when a cycle
+starts or the policy changes. Short dropouts raise nothing: a relay here drops many times a day.
+The failsafe warning is logged once per outage, not per report. `async_remove_entry` deletes this
+heater's repairs. The "Off until target" time bound still notifies: it is an event, not a
+condition to fix.
+
 ### Publish deadlines, never time remaining
 
 A timed Smart Eco pause keeps one `smart_eco_state` label for its whole length (`Paused by manual
@@ -381,7 +399,9 @@ options form.
 | `temperature_tracking.py` | the HA subscription wrapper every temperature consumer uses |
 | `select.py` | Smart Eco Mode and Legionella Disinfection selects |
 | `switch.py` | Eco: Use Utility and Boost: Use PV Excess, views onto the water heater |
-| `binary_sensor.py` | Hot Water In Use draw detector |
+| `binary_sensor.py` | Hot Water In Use draw detector; Element Fault |
+| `element_health.py` | Element Fault's decision (meter vs relay); pure logic, no Home Assistant imports |
+| `diagnostics.py` | config-entry diagnostics: options, fleet member, heater internals, timers |
 
 `fleet.py` is deliberately Home-Assistant-free and driven by an injected `now`, so its decisions can
 be unit tested without an event loop. Keep new decision logic there and the plumbing in
@@ -396,10 +416,13 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   Drop the plain three once `hacs.json`'s minimum core is 2026.11 or later.
 - The surplus boost has been seen on hardware heating on surplus, stopping at its target (the relay
   opened 87 ms after the 61 C reading) and locking out twice in one afternoon, the element starting
-  again at the exact moment a lockout ended. Weak spot seen the same afternoon: the short window is
-  measured from surplus arriving (`_surplus_window_start`), so the first short boost after a long
-  sunny stretch is not locked out and costs one 2-3 minute battery draw before the next one is.
-  Measuring from the boost's own start would catch it; not done, as the cost was small.
+  again at the exact moment a lockout ended. The weak spot seen that afternoon (the short window
+  measured only from surplus arriving, so the first short boost after a long sunny stretch was not
+  locked out) is closed in 4.6.2: the window starts at the later of surplus arriving and the boost's
+  element coming on (`_boost_heating_since`). Not yet seen on hardware.
+- Element Fault (4.6.2) is new and unproven on hardware. Its thresholds (100 W drawing, 20 W idle,
+  3 / 10 min holds, no-draw only below min(target, 50 C) - 5 C) are guesses sized to keep a
+  mechanical thermostat's cutout from reading as a fault.
 - **Since 4.6.0 a long silent gap can count toward a disinfection hold** (`MAX_ELEMENT_OFF_GAP`,
   `sensor.py`): up to 2 h, when the heater switch stayed off for the whole gap (`_element_off_since`:
   off now and `last_changed` no later than the gap's start) and both readings are at or above 60 C.

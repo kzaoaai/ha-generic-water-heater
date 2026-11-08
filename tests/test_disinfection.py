@@ -62,6 +62,22 @@ async def report_risk(hass, entry, risk):
     await hass.async_block_till_done()
 
 
+def gave_up(hass, entry):
+    """The give-up repair's text (its placeholders), or None if none is raised.
+
+    Since 4.6.2 a give-up is a repair issue rather than a persistent
+    notification: it stays listed until the next cycle or a policy change.
+    """
+    from homeassistant.helpers import issue_registry as ir
+
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"disinfection_gave_up_{entry.entry_id}"
+    )
+    if issue is None:
+        return None
+    return " ".join(str(v) for v in (issue.translation_placeholders or {}).values())
+
+
 async def choose(hass, option):
     """Pick a policy through the select entity, as a person would."""
     await hass.services.async_call(
@@ -301,9 +317,8 @@ async def test_a_cycle_that_gets_nowhere_gives_up_and_says_so(hass, world):  # n
 
     with freeze_time(TRIGGER + timedelta(days=4)):
         # Any ordinary sensor update re-runs control, which re-checks the bound.
-        with patch.object(water_heater_module.persistent_notification, "async_create") as told:
-            hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
-            await hass.async_block_till_done()
+        hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
+        await hass.async_block_till_done()
 
     state = hass.states.get(UPSTAIRS)
     assert state.attributes["disinfection_active"] is False
@@ -311,8 +326,8 @@ async def test_a_cycle_that_gets_nowhere_gives_up_and_says_so(hass, world):  # n
     assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_OFF
     assert hass.states.get(SELECT).state == "Off"
 
-    assert told.called, "the owner was never told the cycle gave up"
-    message = told.call_args.args[1]
+    message = gave_up(hass, upstairs)
+    assert message is not None, "the owner was never told the cycle gave up"
     # Nothing was blocking this tank -- eco was permitting throughout -- so the
     # message must not blame Smart Eco for it.
     assert "cannot reach 60" in message
@@ -334,9 +349,8 @@ async def test_a_standing_policy_that_gives_up_stays_armed_but_backs_off(hass, w
         assert hass.states.get(UPSTAIRS).state == STATE_PERFORMANCE
 
     with freeze_time(TRIGGER + timedelta(days=4)):
-        with patch.object(water_heater_module.persistent_notification, "async_create") as told:
-            hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
-            await hass.async_block_till_done()
+        hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
+        await hass.async_block_till_done()
         await report_risk(hass, upstairs, "Elevated")
 
     state = hass.states.get(UPSTAIRS)
@@ -344,7 +358,7 @@ async def test_a_standing_policy_that_gives_up_stays_armed_but_backs_off(hass, w
     assert state.attributes["legionella_mode"] == LEGIONELLA_MODE_ON
     assert hass.states.get(SELECT).state == "As needed (eco)"
     assert state.attributes["disinfection_retry_after"] is not None
-    assert "stays on" in told.call_args.args[1]
+    assert "stays on" in gave_up(hass, upstairs)
 
     # Still inside the backoff: the interval (7 days by default) has not passed.
     with freeze_time(TRIGGER + timedelta(days=10)):
@@ -383,12 +397,12 @@ async def test_the_give_up_notice_names_smart_eco_when_it_is_the_blocker(hass, w
         await hass.async_block_till_done()
 
     with freeze_time(TRIGGER + timedelta(days=4)):
-        with patch.object(water_heater_module.persistent_notification, "async_create") as told:
-            hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
-            await hass.async_block_till_done()
+        hass.states.async_set(UPSTAIRS_SENSOR, "44.0")
+        await hass.async_block_till_done()
 
-    assert told.called
-    assert "Smart Eco is gating" in told.call_args.args[1]
+    message = gave_up(hass, upstairs)
+    assert message is not None
+    assert "Smart Eco is gating" in message
 
 
 async def test_a_cycle_still_running_is_not_given_up_early(hass, world):  # noqa: F811

@@ -374,3 +374,26 @@ async def test_normal_heating_still_runs_to_the_hot_tolerance(hass, world):  # n
     hass.states.async_set(UPSTAIRS_SENSOR, "53", {"device_class": "temperature"})
     await hass.async_block_till_done()
     assert not switch_on(hass)
+
+
+async def test_a_short_boost_after_a_long_sunny_stretch_is_locked_out(hass, world):  # noqa: F811
+    """The short-run window starts when the boost's element came on.
+
+    Measured only from surplus arriving, a boost that started near the end of a
+    long sunny stretch was never short -- the window had been open for hours --
+    so the first battery-drawing run after it went unpunished (2026-10-18).
+    """
+    with freeze_time(T0) as frozen:
+        await boosting(hass, temperature="61.5")  # at its boost target: idle
+        await set_state(hass, PV_EXCESS, STATE_ON)
+        assert not switch_on(hass), "test premise: satisfied, not boosting"
+
+        frozen.tick(timedelta(hours=2))
+        await set_state(hass, UPSTAIRS_SENSOR, "55")  # a draw: the boost resumes
+        assert switch_on(hass)
+
+        frozen.tick(timedelta(minutes=3))
+        await set_state(hass, PV_EXCESS, STATE_OFF)
+        assert heater(hass).attributes["surplus_boost_locked_until"] is not None, (
+            "a three-minute boost run was not locked out after a long surplus window"
+        )

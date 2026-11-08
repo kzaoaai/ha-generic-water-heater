@@ -258,5 +258,19 @@
       "name": "Release load shed",
       "description": "Release a load shed previously applied with the shed service and resume the operation mode and Smart Eco policy the heater already had. Does nothing if the heater is not shed."
     }
+  },
+  "issues": {
+    "temperature_sensor_unavailable": {
+      "title": "{name}: temperature sensor unavailable",
+      "description": "The temperature sensor {entity_id} has reported no reading for more than ten minutes. While it is down the failsafe keeps the heater switched off, so the tank is not heating. The repair clears itself when a reading arrives."
+    },
+    "heater_switch_unavailable": {
+      "title": "{name}: heater switch unavailable",
+      "description": "The heater switch {entity_id} has been unavailable for more than ten minutes, so the heater can neither turn the element on nor off, and commands sent meanwhile are lost. The repair clears itself when the switch is back."
+    },
+    "disinfection_gave_up": {
+      "title": "{name}: disinfection cycle gave up",
+      "description": "A disinfection cycle ran for {days} days without reaching 60 °C for a full hour, so {outcome}. Hold progress reached {progress} minutes. {blocked_by} The repair clears when a new cycle starts or the disinfection policy is changed."
+    }
   }
 }

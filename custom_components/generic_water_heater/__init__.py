@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.util import slugify
 import homeassistant.util.dt as dt_util
 
 from .fleet import FLEET_KEY, HeaterFleet
@@ -181,6 +182,28 @@ def async_meter_identifiers(
     return set(meter_device.identifiers) if meter_device is not None else set()
 
 
+def name_heater_entity(
+    entity, domain: str, name: str | None, label: str, device_has_name: bool
+) -> None:
+    """Name one of the heater's helper entities, and suggest its entity_id.
+
+    Shared by every platform (it was copied into each). The friendly name is
+    spelled out unless the device can supply one (async_resolve_heater_device).
+    The entity_id is suggested from the heater's own name -- `<name> <label>`,
+    e.g. sensor.upstairs_water_heater_disinfection_due -- rather than left to
+    Home Assistant, which builds it from the DEVICE name for an entity with
+    has_entity_name. Devices get renamed, so an
+    entity added later came out unlike its siblings, whose ids were fixed
+    under the old device name. A suggestion only applies to a new registry
+    entry: existing entities keep their ids.
+    """
+    if name and not device_has_name:
+        entity._attr_name = f"{name} {label}"
+        entity._attr_has_entity_name = False
+    if name:
+        entity.entity_id = f"{domain}.{slugify(f'{name} {label}')}"
+
+
 def async_resolve_heater_device(
     hass: HomeAssistant, heater_entity_id: str, power_sensor: str | None = None
 ):
@@ -303,6 +326,18 @@ async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if runtime.get(CONFIG_SNAPSHOT_KEY) == (dict(entry.data), dict(entry.options)):
         return
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop this heater's repair issues with it (water_heater.py raises them)."""
+    from homeassistant.helpers import issue_registry as ir  # noqa: PLC0415
+
+    for kind in (
+        "temperature_sensor_unavailable",
+        "heater_switch_unavailable",
+        "disinfection_gave_up",
+    ):
+        ir.async_delete_issue(hass, DOMAIN, f"{kind}_{entry.entry_id}")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

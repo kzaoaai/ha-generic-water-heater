@@ -42,6 +42,7 @@ from homeassistant.helpers.dispatcher import (
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.template import Template, result_as_boolean
 
@@ -139,6 +140,15 @@ SURPLUS_BOOST_LOCKOUT = timedelta(minutes=30)
 # for the eco condition, parked off, until its 3-day give-up. 8 h covers heat-up
 # plus hold with margin while still bounding a dead element.
 DISINFECTION_BYPASS_HOURS = 8
+
+# How long the temperature sensor or the heater switch may be unavailable before
+# it is raised in Settings > Repairs. Short dropouts are routine (a relay here
+# drops off the network many times a day and comes straight back); ten minutes
+# is not, and while the sensor is down the failsafe holds the tank off.
+OUTAGE_REPAIR_AFTER = timedelta(minutes=10)
+ISSUE_TEMPERATURE_SENSOR = "temperature_sensor_unavailable"
+ISSUE_SWITCH = "heater_switch_unavailable"
+ISSUE_DISINFECTION_GAVE_UP = "disinfection_gave_up"
 
 DEFAULT_NAME = "Generic Water Heater"
 
@@ -405,6 +415,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._surplus_boost_target = surplus_boost_target
         # When the current surplus window opened, for the short-boost lockout.
         self._surplus_window_start: datetime | None = None
+        # When the element last came on while the boost was active (None while
+        # it is not). The short-run check measures from here, not only from
+        # surplus arriving: see _handle_surplus_edge.
+        self._boost_heating_since: datetime | None = None
         self._surplus_boost_locked_until: datetime | None = None
         self._surplus_boost_lockout_timer = None
         self._runtime = runtime
@@ -427,6 +441,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # runs before the sensor is read, and on a restart the sensor's
         # integration may load after this one.
         self._temperature_lost = False
+        self._sensor_outage_timer = None
+        self._switch_outage_timer = None
         self._operation_list = [
             STATE_ELECTRIC,
             STATE_OFF,
@@ -793,6 +809,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         # A person choosing a policy is fresh intent; a give-up backoff left by
         # the previous one does not carry over.
         self._disinfection_retry_after = None
+        self._clear_issue(ISSUE_DISINFECTION_GAVE_UP)
         self._debug_log("disinfection policy: %s (source=%s)", mode, source)
 
         if mode == LEGIONELLA_MODE_OFF and self._disinfecting:
@@ -886,6 +903,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             prior = STATE_ELECTRIC
 
         self._disinfecting = True
+        self._clear_issue(ISSUE_DISINFECTION_GAVE_UP)
         self._disinfection_prior_mode = prior
         self._disinfection_started_at = dt_util.utcnow().isoformat()
         self._current_operation = STATE_PERFORMANCE
@@ -1090,16 +1108,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 "it has been stopped; the policy stays on and will try again "
                 f"after {dt_util.as_local(retry).strftime('%Y-%m-%d %H:%M')}"
             )
-        persistent_notification.async_create(
-            self.hass,
-            (
-                f"{self.name} ran a disinfection cycle for "
-                f"{DISINFECTION_GIVE_UP_DAYS} days without reaching 60 °C for a "
-                f"full hour, so {outcome}. "
-                f"Hold progress reached {progress} minutes. {blocked_by}"
-            ),
-            title="Water heater disinfection gave up",
-            notification_id=f"{DOMAIN}_{self._device_identifier}_disinfection",
+        # A repair rather than a notification: it stays listed until the next
+        # cycle starts or the policy changes, instead of being dismissed once.
+        self._raise_issue(
+            ISSUE_DISINFECTION_GAVE_UP,
+            days=str(DISINFECTION_GIVE_UP_DAYS),
+            outcome=outcome,
+            progress=str(progress),
+            blocked_by=blocked_by,
         )
         return True
 
@@ -1492,13 +1508,72 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._cooldown_timer,
             self._smart_eco_resume_timer,
             self._surplus_boost_lockout_timer,
+            self._sensor_outage_timer,
+            self._switch_outage_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
+        self._sensor_outage_timer = None
+        self._switch_outage_timer = None
         self._surplus_boost_lockout_timer = None
         self._cooldown_timer = None
         self._smart_eco_resume_timer = None
         await super().async_will_remove_from_hass()
+
+    # --- Repairs ----------------------------------------------------------------
+
+    def _issue_id(self, kind: str) -> str:
+        return f"{kind}_{self._device_identifier}"
+
+    @callback
+    def _raise_issue(self, kind: str, **placeholders: str) -> None:
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._issue_id(kind),
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=kind,
+            translation_placeholders={"name": str(self.name), **placeholders},
+        )
+
+    @callback
+    def _clear_issue(self, kind: str) -> None:
+        ir.async_delete_issue(self.hass, DOMAIN, self._issue_id(kind))
+
+    @callback
+    def _start_outage_watch(self, what: str) -> None:
+        """Raise a repair if the sensor or switch is still down after a while."""
+        attr = "_sensor_outage_timer" if what == "sensor" else "_switch_outage_timer"
+        if getattr(self, attr) is not None or self.hass is None:
+            return
+        kind, entity_id = (
+            (ISSUE_TEMPERATURE_SENSOR, self.sensor_entity_id)
+            if what == "sensor"
+            else (ISSUE_SWITCH, self.heater_entity_id)
+        )
+
+        @callback
+        def _raise(_now) -> None:
+            setattr(self, attr, None)
+            self._raise_issue(kind, entity_id=str(entity_id))
+
+        setattr(
+            self,
+            attr,
+            async_call_later(self.hass, OUTAGE_REPAIR_AFTER.total_seconds(), _raise),
+        )
+
+    @callback
+    def _end_outage_watch(self, what: str) -> None:
+        attr = "_sensor_outage_timer" if what == "sensor" else "_switch_outage_timer"
+        if (timer := getattr(self, attr)) is not None:
+            timer()
+            setattr(self, attr, None)
+        if self.hass is not None:
+            self._clear_issue(
+                ISSUE_TEMPERATURE_SENSOR if what == "sensor" else ISSUE_SWITCH
+            )
 
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
@@ -1509,10 +1584,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # was not enough: in PERFORMANCE that same pass switched it straight
             # back on, and an OFF deferred by min_on_duration was retried
             # through a pass that skipped control for want of a temperature.
-            _LOGGER.warning(
-                "No Temperature information, entering Failsafe, turning off heater %s",
-                self.heater_entity_id,
-            )
+            if not self._temperature_lost:
+                # Once per outage: it used to warn on every unavailable or
+                # unknown report, which a flapping sensor repeats for hours.
+                _LOGGER.warning(
+                    "No Temperature information, entering Failsafe, turning off heater %s",
+                    self.heater_entity_id,
+                )
+                self._start_outage_watch("sensor")
             self._current_temperature = None
             self._temperature_lost = True
         else:
@@ -1520,6 +1599,11 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 self._current_temperature = float(value)
             except (TypeError, ValueError):
                 return
+            if self._temperature_lost:
+                _LOGGER.info(
+                    "%s: temperature reading is back, leaving Failsafe", self.name
+                )
+                self._end_outage_watch("sensor")
             self._temperature_lost = False
 
         _LOGGER.debug(
@@ -1739,10 +1823,20 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         now = dt_util.utcnow()
         if self._surplus_active:
             self._surplus_window_start = now
+            self._note_boost_heating(now)
             return
 
+        # Measured from the later of surplus arriving and this run of the
+        # element starting. From surplus alone, the first short boost after a
+        # long sunny stretch was never locked out -- the window had been open
+        # for hours -- and cost one battery-drawing run before the next was
+        # (seen 2026-10-18). A run that started before the surplus did is
+        # bounded by the surplus window as before.
         started = self._surplus_window_start
+        if started is not None and self._boost_heating_since is not None:
+            started = max(started, self._boost_heating_since)
         self._surplus_window_start = None
+        self._boost_heating_since = None
         if boost_was_heating and started is not None and now - started < SURPLUS_BOOST_SHORT_RUN:
             self._surplus_boost_locked_until = now + SURPLUS_BOOST_LOCKOUT
             if self._surplus_boost_lockout_timer is not None:
@@ -1757,6 +1851,15 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 int((now - started).total_seconds()),
                 self._surplus_boost_locked_until.isoformat(),
             )
+
+    @callback
+    def _note_boost_heating(self, now: datetime) -> None:
+        """Stamp when the element came on under the boost; clear when it stops."""
+        if self._surplus_boost_heating_now():
+            if self._boost_heating_since is None:
+                self._boost_heating_since = now
+        else:
+            self._boost_heating_since = None
 
     async def _async_surplus_boost_lockout_ended(self, _now) -> None:
         """Let the boost try again."""
@@ -1790,8 +1893,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         _LOGGER.debug("New switch state = %s", new_state)
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             self._attr_available = False
+            self._start_outage_watch("switch")
         else:
             self._attr_available = True
+            self._end_outage_watch("switch")
             _LOGGER.debug("%s became Available", self.name)
             self._debug_log(
                 "switch changed: new_state=%s, last_commanded=%s, mode=%s",
@@ -1943,6 +2048,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if state_changed:
                 self._pending_switch_state = None
 
+        if self._surplus_active:
+            self._note_boost_heating(dt_util.utcnow())
         self._debug_log_hvac_action("switch state update")
         self._update_smart_eco_state()
         self.async_write_ha_state()

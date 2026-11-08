@@ -7,6 +7,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import (
+    name_heater_entity,
     eco_condition_configured,
     CONF_POWER_SENSOR,
     CONF_ENABLE_LEGIONELLA_SENSOR,
@@ -139,9 +140,7 @@ class GenericWaterHeaterSmartEcoSelect(SelectEntity, RestoreEntity):
 
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Smart Eco Mode"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "select", name, "Smart Eco Mode", device_has_name)
 
     @property
     def current_option(self) -> str:
@@ -235,9 +234,7 @@ class GenericWaterHeaterLegionellaSelect(SelectEntity, RestoreEntity):
 
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Legionella Disinfection"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "select", name, "Legionella Disinfection", device_has_name)
 
     @property
     def current_option(self) -> str:

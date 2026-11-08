@@ -26,6 +26,14 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Failsafe shutdown when the temperature sensor becomes unavailable or unknown, in every heating
   mode (including `performance` and a disinfection cycle) and without waiting for the minimum on
   duration. The element stays off until the sensor reports a reading again.
+- Repairs (Settings > System > Repairs) when the temperature sensor or the heater switch has been
+  unavailable for more than 10 minutes, or a disinfection cycle gives up. Each clears itself.
+- **Element Fault** (with a `power_sensor`): a problem sensor that turns on when the meter and the
+  relay disagree -- drawing power while switched off (3 min), or switched on with the tank well
+  below any thermostat cutout but drawing nothing (10 min). Read-only: it never switches anything.
+  The `fault` attribute says which.
+- Diagnostics download (the integration's device or entry menu) with options, fleet state and the
+  heater's internal state.
 - Automatic device linking to the same device as the controlled switch when possible.
 
 ## Heating Logic

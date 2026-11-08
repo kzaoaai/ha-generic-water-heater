@@ -13,6 +13,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from . import (
+    name_heater_entity,
     CONF_HEATER,
     CONF_POWER_SENSOR,
     CONF_SURPLUS_BOOST_TARGET,
@@ -86,9 +87,7 @@ class _EcoSwitch(SwitchEntity):
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{self._suffix}"
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} {self._attr_name}"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "switch", name, self._attr_name, device_has_name)
 
     @property
     def is_on(self) -> bool:

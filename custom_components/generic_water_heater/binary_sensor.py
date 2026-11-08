@@ -11,13 +11,25 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.const import CONF_NAME, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
+from homeassistant.const import (
+    CONF_NAME,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import callback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 import homeassistant.util.dt as dt_util
 
 from . import (
+    name_heater_entity,
     CONF_POWER_SENSOR,
     CONF_ENABLE_HOT_WATER_IN_USE,
     CONF_HEATER,
@@ -26,6 +38,7 @@ from . import (
     DOMAIN,
     async_resolve_heater_device,
 )
+from .element_health import HOLD, element_fault, to_watts
 from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,37 +96,178 @@ LINGER = timedelta(minutes=2)
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the Hot Water In Use sensor, if an in-use entity was configured."""
     data = {**entry.data, **getattr(entry, "options", {})}
-
-    if not data.get(CONF_ENABLE_HOT_WATER_IN_USE, False):
-        # Gated on its own flag, like every other optional entity here. NOT on
-        # the water-in-use entity below: the detector's primary signal is this
-        # tank's own temperature fall, which needs no external help, so hanging
-        # the sensor's existence on a flow sensor would deny it to anyone who
-        # has no such sensor but would still get its strongest tier.
-        return
-
-    water_in_use_entity = (data.get(CONF_WATER_IN_USE_ENTITY) or "").strip() or None
-
-    source_sensor_entity_id = data.get(CONF_SENSOR)
-    if not source_sensor_entity_id:
-        return
-
     device_identifiers, device_has_name = async_resolve_heater_device(
         hass, data.get(CONF_HEATER), data.get(CONF_POWER_SENSOR)
     )
+    entities: list[BinarySensorEntity] = []
 
-    async_add_entities(
-        [
+    # Gated on its own flag, like every other optional entity here. NOT on the
+    # water-in-use entity: the detector's primary signal is this tank's own
+    # temperature fall, which needs no external help, so hanging the sensor's
+    # existence on a flow sensor would deny it to anyone who has no such sensor
+    # but would still get its strongest tier.
+    source_sensor_entity_id = data.get(CONF_SENSOR)
+    if data.get(CONF_ENABLE_HOT_WATER_IN_USE, False) and source_sensor_entity_id:
+        entities.append(
             HotWaterInUseBinarySensor(
                 name=data.get(CONF_NAME),
                 source_sensor_entity_id=source_sensor_entity_id,
-                water_in_use_entity_id=water_in_use_entity,
+                water_in_use_entity_id=(
+                    (data.get(CONF_WATER_IN_USE_ENTITY) or "").strip() or None
+                ),
                 device_identifier=entry.entry_id,
                 device_identifiers=device_identifiers,
                 device_has_name=device_has_name,
             )
-        ]
-    )
+        )
+
+    # Element Fault needs a meter, and never one of our own mirrors.
+    power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
+    if power_sensor is not None and data.get(CONF_HEATER):
+        source = er.async_get(hass).async_get(power_sensor)
+        if source is None or source.platform != DOMAIN:
+            entities.append(
+                ElementFaultBinarySensor(
+                    name=data.get(CONF_NAME),
+                    entry_id=entry.entry_id,
+                    heater_entity_id=data[CONF_HEATER],
+                    power_sensor=power_sensor,
+                    runtime=hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {}),
+                    device_identifiers=device_identifiers,
+                    device_has_name=device_has_name,
+                )
+            )
+
+    if entities:
+        async_add_entities(entities)
+
+
+class ElementFaultBinarySensor(BinarySensorEntity):
+    """On while the meter and the relay disagree for long enough (element_health.py).
+
+    Read-only: it reports, it never acts. Its state changes only when a fault
+    starts or ends, and `fault_since` is a fixed time, so it writes nothing
+    while it waits.
+    """
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = "Element Fault"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        name: str | None,
+        entry_id: str,
+        heater_entity_id: str,
+        power_sensor: str,
+        runtime: dict,
+        device_identifiers,
+        device_has_name: bool = False,
+    ) -> None:
+        self._entry_id = entry_id
+        self._heater_entity_id = heater_entity_id
+        self._power_sensor = power_sensor
+        self._runtime = runtime
+        self._device_identifiers = device_identifiers
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_element_fault"
+        self._attr_is_on = False
+        self._pending: str | None = None
+        self._pending_since: datetime | None = None
+        self._fault: str | None = None
+        self._fault_since: datetime | None = None
+        self._timer = None
+        name_heater_entity(self, "binary_sensor", name, "Element Fault", device_has_name)
+
+    @property
+    def device_info(self):
+        if self._device_identifiers:
+            return {"identifiers": self._device_identifiers}
+        return {"identifiers": {(DOMAIN, self._entry_id)}}
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "fault": self._fault,
+            "fault_since": self._fault_since.isoformat() if self._fault_since else None,
+            "power_sensor": self._power_sensor,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass,
+                [self._heater_entity_id, self._power_sensor],
+                self._async_inputs_changed,
+            )
+        )
+        self.async_on_remove(self._cancel_timer)
+        self._evaluate()
+
+    @callback
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer()
+            self._timer = None
+
+    @callback
+    def _async_inputs_changed(self, _event) -> None:
+        self._evaluate()
+
+    @callback
+    def _async_timer_fired(self, _now) -> None:
+        self._timer = None
+        self._evaluate()
+
+    def _readings(self) -> tuple[bool | None, float | None, float | None, float | None]:
+        switch = self.hass.states.get(self._heater_entity_id)
+        switch_on = (
+            None
+            if switch is None or switch.state not in (STATE_ON, STATE_OFF)
+            else switch.state == STATE_ON
+        )
+        power_w = None
+        meter = self.hass.states.get(self._power_sensor)
+        if meter is not None and meter.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            try:
+                power_w = to_watts(
+                    float(meter.state), meter.attributes.get("unit_of_measurement")
+                )
+            except (TypeError, ValueError):
+                power_w = None
+        heater = self._runtime.get("water_heater_entity")
+        temperature = getattr(heater, "native_current_temperature", None)
+        target = getattr(heater, "native_target_temperature", None)
+        return switch_on, power_w, temperature, target
+
+    @callback
+    def _evaluate(self) -> None:
+        now = dt_util.utcnow()
+        candidate = element_fault(*self._readings())
+
+        if candidate != self._pending:
+            self._pending = candidate
+            self._pending_since = now if candidate is not None else None
+            self._cancel_timer()
+
+        fault = None
+        if candidate is not None and self._pending_since is not None:
+            remaining = (self._pending_since + HOLD[candidate] - now).total_seconds()
+            if remaining <= 0:
+                fault = candidate
+            elif self._timer is None:
+                self._timer = async_call_later(
+                    self.hass, remaining, self._async_timer_fired
+                )
+
+        if fault != self._fault:
+            self._fault = fault
+            self._fault_since = self._pending_since if fault is not None else None
+            self._attr_is_on = fault is not None
+            if self.hass is not None and self.entity_id:
+                self.async_write_ha_state()
 
 
 class HotWaterInUseBinarySensor(BinarySensorEntity):
@@ -157,9 +311,7 @@ class HotWaterInUseBinarySensor(BinarySensorEntity):
 
         # Spell the name out unless the device can supply one. See
         # async_resolve_heater_device.
-        if name and not device_has_name:
-            self._attr_name = f"{name} Hot Water In Use"
-            self._attr_has_entity_name = False
+        name_heater_entity(self, "binary_sensor", name, "Hot Water In Use", device_has_name)
 
         self._attr_unique_id = f"{DOMAIN}_{device_identifier}_hot_water_in_use"
 
