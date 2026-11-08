@@ -131,6 +131,15 @@ OWN_ECHO_WINDOW = timedelta(seconds=30)
 SURPLUS_BOOST_SHORT_RUN = timedelta(minutes=10)
 SURPLUS_BOOST_LOCKOUT = timedelta(minutes=30)
 
+# How long a disinfection cycle that does not wait for eco ("Once", "As needed")
+# may stand the eco policy down. It used to share the manual-pause bound
+# (smart_eco_manual_off_resume_hours, 3 h on a real 200 L / 2 kW tank), which is
+# about the time to heat from cold to 60 C, before the one-hour hold even
+# starts: the bypass ran out short of 60 C and the cycle fell back to waiting
+# for the eco condition, parked off, until its 3-day give-up. 8 h covers heat-up
+# plus hold with margin while still bounding a dead element.
+DISINFECTION_BYPASS_HOURS = 8
+
 DEFAULT_NAME = "Generic Water Heater"
 
 
@@ -2227,22 +2236,25 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # Unreadable stamp: restart the clock rather than leave it unbounded.
             self._smart_eco_off_until_target_since = dt_util.utcnow().isoformat()
             return False
-        if dt_util.utcnow() - started < timedelta(
-            hours=self._smart_eco_manual_off_resume_hours
-        ):
+        bound_hours = (
+            DISINFECTION_BYPASS_HOURS
+            if self._off_until_target_for_disinfection
+            else self._smart_eco_manual_off_resume_hours
+        )
+        if dt_util.utcnow() - started < timedelta(hours=bound_hours):
             return False
 
         _LOGGER.info(
             "%s: smart eco off-until-target expired after %s h; restoring policy",
             self.name,
-            self._smart_eco_manual_off_resume_hours,
+            bound_hours,
         )
         persistent_notification.async_create(
             self.hass,
             (
                 f"{self.name} had Smart Eco set to 'Off until target reached', "
                 f"but the tank did not get there within "
-                f"{self._smart_eco_manual_off_resume_hours} hours. Smart Eco has "
+                f"{bound_hours} hours. Smart Eco has "
                 "been restored so it does not stay disabled. A disinfection "
                 "cycle still running will continue, but only when the eco "
                 "condition allows."

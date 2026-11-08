@@ -53,6 +53,113 @@ _WINDOW = timedelta(days=7)
 _ATTR_MAX_RECORDED_AT = "highest_recorded_at"
 _ATTR_SAMPLES_TRACKED = "samples_tracked"
 
+# History is kept in 5-minute buckets (4.6.1), not one entry per reading. A
+# sensor reporting every ~78 s kept ~7.7k samples per 7-day window, stored in
+# full by both history sensors in core.restore_state (~600 KB each, rewritten
+# every 15 minutes), and `samples_tracked` changed on every reading, so each
+# reading wrote a recorder row even when the state had not moved. It now counts
+# buckets. The disinfection hold never reads this history -- it follows each
+# live reading against the previous one -- so only the 7-day figures and the
+# maximum see the coarser grain.
+HISTORY_BUCKET = timedelta(minutes=5)
+_BUCKET_MINUTES = int(HISTORY_BUCKET.total_seconds() // 60)
+
+
+@dataclass
+class _Bucket:
+    """The readings of one HISTORY_BUCKET: lowest, highest and when it peaked."""
+
+    start: datetime
+    t_min: float
+    t_max: float
+    max_at: datetime
+
+    def as_stored(self) -> list[float]:
+        """Compact on purpose: [start epoch s, min, max, peak offset s].
+
+        Two of these per tank per 5 minutes for 7 days; as dicts with ISO
+        strings the restore data was still ~200 KB per sensor.
+        """
+        return [
+            int(self.start.timestamp()),
+            self.t_min,
+            self.t_max,
+            round((self.max_at - self.start).total_seconds(), 1),
+        ]
+
+
+def _bucket_start(timestamp: datetime) -> datetime:
+    return timestamp - timedelta(
+        minutes=timestamp.minute % _BUCKET_MINUTES,
+        seconds=timestamp.second,
+        microseconds=timestamp.microsecond,
+    )
+
+
+def _add_to_buckets(buckets: list[_Bucket], timestamp: datetime, temperature: float) -> None:
+    """Fold one reading into the bucket list, which stays ordered by start."""
+    start = _bucket_start(timestamp)
+    for bucket in reversed(buckets):
+        if bucket.start == start:
+            bucket.t_min = min(bucket.t_min, temperature)
+            if temperature > bucket.t_max:
+                bucket.t_max = temperature
+                bucket.max_at = timestamp
+            return
+        if bucket.start < start:
+            break
+    buckets.append(_Bucket(start, temperature, temperature, timestamp))
+    if len(buckets) > 1 and buckets[-2].start > start:
+        buckets.sort(key=lambda bucket: bucket.start)
+
+
+def _prune_buckets(buckets: list[_Bucket], reference: datetime) -> list[_Bucket]:
+    """Keep the buckets that overlap the rolling 7-day window."""
+    cutoff = reference - _WINDOW
+    return [bucket for bucket in buckets if bucket.start + HISTORY_BUCKET > cutoff]
+
+
+def _buckets_from_stored(items: list[Any]) -> list[_Bucket]:
+    """Read stored history: buckets, or raw samples stored before 4.6.1."""
+    buckets: list[_Bucket] = []
+    for item in items:
+        try:
+            if isinstance(item, list):
+                start = dt_util.utc_from_timestamp(float(item[0]))
+                buckets.append(
+                    _Bucket(
+                        start,
+                        float(item[1]),
+                        float(item[2]),
+                        start + timedelta(seconds=float(item[3])),
+                    )
+                )
+            elif isinstance(item, dict):
+                timestamp = dt_util.parse_datetime(str(item["timestamp"]))
+                if timestamp is None:
+                    continue
+                _add_to_buckets(buckets, timestamp, float(item["temperature"]))
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError, OSError):
+            continue
+    buckets.sort(key=lambda bucket: bucket.start)
+    return buckets
+
+
+def _last_raw_sample(items: list[Any]) -> tuple[datetime, float] | None:
+    """The newest raw sample in history stored before 4.6.1, if any."""
+    latest: tuple[datetime, float] | None = None
+    for item in items:
+        if not isinstance(item, dict) or "timestamp" not in item:
+            continue
+        try:
+            timestamp = dt_util.parse_datetime(str(item["timestamp"]))
+            temperature = float(item["temperature"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if timestamp is not None and (latest is None or timestamp > latest[0]):
+            latest = (timestamp, temperature)
+    return latest
+
 # --- Legionella thermal-conditions model -----------------------------------
 #
 # This estimates THERMAL CONDITIONS at one sensor. It is not a measurement of
@@ -170,7 +277,7 @@ def _element_off_since(hass, heater_entity_id: str | None) -> Callable[[datetime
 class MaxTemperatureHistoryStoredData(SensorExtraStoredData):
     """Stored data for the 7-day max temperature sensor."""
 
-    history: list[dict[str, Any]]
+    history: list[Any]
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dict representation of the stored sensor data."""
@@ -190,8 +297,12 @@ class MaxTemperatureHistoryStoredData(SensorExtraStoredData):
         if not isinstance(history, list):
             return None
 
-        cleaned_history: list[dict[str, Any]] = []
+        cleaned_history: list[Any] = []
         for item in history:
+            if isinstance(item, list):
+                # A 4.6.1 bucket; validated when it is read (_buckets_from_stored).
+                cleaned_history.append(item)
+                continue
             if not isinstance(item, dict):
                 continue
 
@@ -271,7 +382,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 element_off_since=_element_off_since(hass, heater_entity_id),
             )
         )
-        for detail in (DaysUntilDisinfectionSensor, DisinfectionHoldProgressSensor):
+        for detail in (
+            DaysUntilDisinfectionSensor,
+            DisinfectionDueSensor,
+            DisinfectionHoldProgressSensor,
+        ):
             entities.append(
                 detail(
                     name=name,
@@ -383,7 +498,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         self._source_sensor_entity_id = source_sensor_entity_id
         self._device_identifier = device_identifier
         self._device_identifiers = device_identifiers
-        self._history: list[tuple[datetime, float]] = []
+        self._history: list[_Bucket] = []
         self._max_recorded_at: datetime | None = None
         self._attr_unique_id = f"{DOMAIN}_{device_identifier}_highest_temperature_7_days"
         self._attr_native_value = None
@@ -421,13 +536,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         return MaxTemperatureHistoryStoredData(
             self.native_value,
             self.native_unit_of_measurement,
-            [
-                {
-                    "timestamp": timestamp.isoformat(),
-                    "temperature": temperature,
-                }
-                for timestamp, temperature in self._history
-            ],
+            [bucket.as_stored() for bucket in self._history],
         )
 
     async def async_added_to_hass(self) -> None:
@@ -437,12 +546,7 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         if (stored := await self.async_get_last_sensor_data()) is not None:
             self._attr_native_value = stored.native_value
             self._attr_native_unit_of_measurement = stored.native_unit_of_measurement
-            self._history = []
-            for item in stored.history:
-                parsed = dt_util.parse_datetime(item["timestamp"])
-                if parsed is None:
-                    continue
-                self._history.append((parsed, float(item["temperature"])))
+            self._history = _buckets_from_stored(stored.history)
             self._prune_history(dt_util.utcnow())
             self._recalculate_state()
 
@@ -502,15 +606,14 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
             self._attr_native_unit_of_measurement = unit_of_measurement
 
         timestamp = when or dt_util.utcnow()
-        self._history.append((timestamp, temperature))
+        _add_to_buckets(self._history, timestamp, temperature)
         self._prune_history(timestamp)
         self._recalculate_state()
 
     @callback
     def _prune_history(self, reference: datetime) -> None:
-        """Keep only samples inside the rolling 7-day window."""
-        cutoff = reference - _WINDOW
-        self._history = [item for item in self._history if item[0] >= cutoff]
+        """Keep only buckets inside the rolling 7-day window."""
+        self._history = _prune_buckets(self._history, reference)
 
     @callback
     def _recalculate_state(self) -> None:
@@ -520,15 +623,15 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
             self._max_recorded_at = None
             return
 
-        timestamp, temperature = max(self._history, key=lambda item: item[1])
-        self._attr_native_value = temperature
-        self._max_recorded_at = timestamp
+        peak = max(self._history, key=lambda bucket: bucket.t_max)
+        self._attr_native_value = peak.t_max
+        self._max_recorded_at = peak.max_at
 
 @dataclass
 class LegionellaStoredData(SensorExtraStoredData):
     """Stored data for the Legionella thermal-conditions sensor."""
 
-    history: list[dict[str, Any]]
+    history: list[Any]
     last_disinfection_at: str | None
     hold_seconds: float
     hold_open: bool
@@ -536,6 +639,9 @@ class LegionellaStoredData(SensorExtraStoredData):
     # it cannot answer "how long have we been watching" for a tank that has
     # never been disinfected (see _recalculate).
     first_observed_at: str | None = None
+    # The last reading, which the hold advances from. Kept apart from the
+    # bucketed history, which does not keep individual readings.
+    last_sample: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dict representation of the stored sensor data."""
@@ -546,6 +652,7 @@ class LegionellaStoredData(SensorExtraStoredData):
             "hold_seconds": self.hold_seconds,
             "hold_open": self.hold_open,
             "first_observed_at": self.first_observed_at,
+            "last_sample": self.last_sample,
         }
 
     @classmethod
@@ -576,6 +683,10 @@ class LegionellaStoredData(SensorExtraStoredData):
         if not isinstance(first, str):
             first = None
 
+        last_sample = restored.get("last_sample")
+        if not isinstance(last_sample, dict):
+            last_sample = None
+
         return cls(
             extra.native_value,
             extra.native_unit_of_measurement,
@@ -584,7 +695,21 @@ class LegionellaStoredData(SensorExtraStoredData):
             hold_seconds,
             hold_open,
             first,
+            last_sample,
         )
+
+
+def _stored_last_sample(stored: LegionellaStoredData) -> tuple[datetime, float] | None:
+    """The last reading from stored data, in either format."""
+    item = stored.last_sample
+    if item is not None:
+        try:
+            timestamp = dt_util.parse_datetime(str(item["timestamp"]))
+            if timestamp is not None:
+                return timestamp, float(item["temperature"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return _last_raw_sample(stored.history)
 
 
 class LegionellaRiskSensor(SensorEntity, RestoreEntity):
@@ -623,7 +748,12 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         self._device_identifier = device_identifier
         self._device_identifiers = device_identifiers
         self._interval = timedelta(days=max(1, int(interval_days)))
-        self._history: list[tuple[datetime, float]] = []
+        self._history: list[_Bucket] = []
+        self._last_sample: tuple[datetime, float] | None = None
+        # (signature of the closed buckets, (window h, growth h, lethality)).
+        self._metrics_cache: tuple[Any, tuple[float, float, float]] | None = None
+        # What _publish_risk last dispatched (see there).
+        self._last_published: Any = None
         self._last_disinfection_at: datetime | None = None
         self._first_observed_at: datetime | None = None
         # Progress of a disinfection hold currently in flight. Reset the moment
@@ -696,22 +826,16 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
                 if stored.last_disinfection_at
                 else None
             )
-            for item in stored.history:
-                parsed = dt_util.parse_datetime(item.get("timestamp", ""))
-                if parsed is None:
-                    continue
-                try:
-                    self._history.append((parsed, float(item["temperature"])))
-                except (KeyError, TypeError, ValueError):
-                    continue
+            self._history = _buckets_from_stored(stored.history)
+            self._last_sample = _stored_last_sample(stored)
             self._first_observed_at = (
                 dt_util.parse_datetime(stored.first_observed_at)
                 if stored.first_observed_at
                 else None
             )
             if self._first_observed_at is None and self._history:
-                # Stored before 4.6.2: the oldest sample is the best we know.
-                self._first_observed_at = min(ts for ts, _temp in self._history)
+                # Stored before 4.6.1: the oldest sample is the best we know.
+                self._first_observed_at = self._history[0].start
             self._restore_hold(stored, dt_util.utcnow())
             self._prune(dt_util.utcnow())
 
@@ -740,16 +864,28 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         is woken by a dispatcher signal -- the same wiring the Smart Eco select
         already uses in the other direction.
         """
+        progress = round(self._hold_seconds / 60, 1)
         if self._runtime is not None:
             self._runtime["legionella_risk"] = self._attr_native_value
-            self._runtime["legionella_hold_progress_minutes"] = round(
-                self._hold_seconds / 60, 1
-            )
+            self._runtime["legionella_hold_progress_minutes"] = progress
             self._runtime["legionella_last_disinfection_at"] = self._last_disinfection_at
             self._runtime["legionella_interval_days"] = self._interval.days
 
         if getattr(self, "hass", None) is None:
             return
+        # Only when something a listener reads has changed. This used to fire
+        # on every reading: the heater re-evaluated its disinfection policy and
+        # the detail sensors rewrote their state each time, for a verdict that
+        # changes a few times a week.
+        published = (
+            self._attr_native_value,
+            self._last_disinfection_at,
+            progress,
+            self._interval.days,
+        )
+        if published == self._last_published:
+            return
+        self._last_published = published
         async_dispatcher_send(
             self.hass,
             legionella_risk_signal(self._device_identifier),
@@ -773,10 +909,12 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         if not stored.hold_open or stored.hold_seconds <= 0:
             return
 
-        if not self._history:
+        if self._last_sample is None:
+            self._last_sample = _stored_last_sample(stored)
+        if self._last_sample is None:
             return
 
-        gap = now - self._history[-1][0]
+        gap = now - self._last_sample[0]
         if gap > MAX_CREDITED_GAP or gap < timedelta(0):
             _LOGGER.debug(
                 "%s: not resuming disinfection hold, %.1f minutes unobserved",
@@ -799,16 +937,21 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         return LegionellaStoredData(
             self.native_value,
             self.native_unit_of_measurement,
-            [
-                {"timestamp": ts.isoformat(), "temperature": temp}
-                for ts, temp in self._history
-            ],
+            [bucket.as_stored() for bucket in self._history],
             self._last_disinfection_at.isoformat()
             if self._last_disinfection_at
             else None,
             self._hold_seconds,
             self._hold_open,
             self._first_observed_at.isoformat() if self._first_observed_at else None,
+            (
+                {
+                    "timestamp": self._last_sample[0].isoformat(),
+                    "temperature": self._last_sample[1],
+                }
+                if self._last_sample is not None
+                else None
+            ),
         )
 
     async def _async_get_last_data(self) -> LegionellaStoredData | None:
@@ -843,7 +986,8 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         if self._first_observed_at is None:
             self._first_observed_at = timestamp
         self._advance_hold(timestamp, temperature)
-        self._history.append((timestamp, temperature))
+        self._last_sample = (timestamp, temperature)
+        _add_to_buckets(self._history, timestamp, temperature)
         self._prune(timestamp)
 
     def _element_off_throughout(self, since: datetime, elapsed: timedelta) -> bool:
@@ -885,7 +1029,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             self._hold_seconds = 0.0
             return
 
-        previous = self._history[-1] if self._history else None
+        previous = self._last_sample
         if previous is None:
             return
 
@@ -954,26 +1098,46 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
 
     @callback
     def _prune(self, reference: datetime) -> None:
-        """Keep only samples inside the rolling window."""
-        cutoff = reference - _WINDOW
-        self._history = [item for item in self._history if item[0] >= cutoff]
+        """Keep only buckets inside the rolling window."""
+        self._history = _prune_buckets(self._history, reference)
 
     def _window_metrics(self) -> tuple[float, float, float, float | None]:
         """Return (window hours, growth-band hours, log10 reduction, peak C).
 
-        Every interval is credited at the LOWER of its two endpoint
-        temperatures, so a brief spike between two widely spaced samples cannot
-        claim the whole interval.
+        Every interval between consecutive buckets is credited at the LOWER of
+        the two buckets' lowest readings, so a brief spike between two widely
+        spaced samples cannot claim the whole interval. The bucket still being
+        filled is left out of the sums -- its lowest reading moves with every
+        cooling sample, which would rewrite the attributes on every reading --
+        and the sums are cached until a bucket closes or ages out. The peak
+        includes it.
         """
         if not self._history:
             return 0.0, 0.0, 0.0, None
 
+        closed = self._history
+        if self._history[-1].start >= _bucket_start(dt_util.utcnow()):
+            closed = self._history[:-1]
+        signature = (
+            len(closed),
+            closed[0].start if closed else None,
+            closed[-1].start if closed else None,
+        )
+        if self._metrics_cache is None or self._metrics_cache[0] != signature:
+            self._metrics_cache = (signature, self._sum_window(closed))
+        window_hours, growth_hours, lethality = self._metrics_cache[1]
+        peak = max(bucket.t_max for bucket in self._history)
+        return window_hours, growth_hours, lethality, peak
+
+    @staticmethod
+    def _sum_window(buckets: list[_Bucket]) -> tuple[float, float, float]:
         window_seconds = 0.0
         growth_seconds = 0.0
         lethality = 0.0
 
-        for (prev_ts, prev_t), (ts, temp) in zip(self._history, self._history[1:]):
-            elapsed = ts - prev_ts
+        for prev, bucket in zip(buckets, buckets[1:]):
+            prev_t, temp = prev.t_min, bucket.t_min
+            elapsed = bucket.start - prev.start
             if elapsed <= timedelta(0) or elapsed > MAX_CREDITED_GAP:
                 continue
             seconds = elapsed.total_seconds()
@@ -990,8 +1154,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
                 if d_value > 0:
                     lethality += (seconds / 60) / d_value
 
-        peak = max(temp for _, temp in self._history)
-        return window_seconds / 3600, growth_seconds / 3600, lethality, peak
+        return window_seconds / 3600, growth_seconds / 3600, lethality
 
     @callback
     def _recalculate(self) -> None:
@@ -1097,6 +1260,11 @@ class DaysUntilDisinfectionSensor(_LegionellaDetailSensor):
     # its old name so existing installs keep their entity_id.
     _label = "Disinfection Due In"
     _key = "legionella_days_until_disinfection"
+    # No statistics (4.6.1): a countdown changes only because the clock moved,
+    # so its long-term statistics recorded nothing but the passage of time.
+    # Disinfection Due is the same fact as a deadline, which a frontend counts
+    # down by itself; this entity stays so nothing reading it breaks.
+    _attr_state_class = None
     _attr_native_unit_of_measurement = UnitOfTime.DAYS
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:calendar-clock"
@@ -1122,6 +1290,29 @@ class DaysUntilDisinfectionSensor(_LegionellaDetailSensor):
             return None
         due = last + timedelta(days=interval)
         return round((due - dt_util.utcnow()).total_seconds() / 86400, 2)
+
+
+class DisinfectionDueSensor(_LegionellaDetailSensor):
+    """When the disinfection interval lapses: a deadline, not time remaining.
+
+    Changes only when a hold completes (or the interval is reconfigured), so it
+    writes nothing while it waits; a dashboard counts down to it by itself.
+    Unknown until a cycle has been seen, like Disinfection Due In.
+    """
+
+    _label = "Disinfection Due"
+    _key = "legionella_disinfection_due"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_state_class = None
+    _attr_icon = "mdi:calendar-check"
+
+    @property
+    def native_value(self) -> datetime | None:
+        last = self._runtime.get("legionella_last_disinfection_at")
+        interval = self._runtime.get("legionella_interval_days")
+        if last is None or interval is None:
+            return None
+        return last + timedelta(days=interval)
 
 
 class DisinfectionHoldProgressSensor(_LegionellaDetailSensor):

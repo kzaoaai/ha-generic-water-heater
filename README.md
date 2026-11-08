@@ -8,7 +8,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode). Heating is allowed by named inputs (a surplus entity, a utility entity with its own **Eco: Use Utility** switch) and an optional template.
 - Surplus boost: while surplus is active and **Boost: Use PV Excess** is on, heat toward a higher target, storing spare power as heat without ever heating past the normal target on paid power.
 - Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, timed pause states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
-- Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows.
+- Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows. Its history (and the Legionella Risk sensor's) is kept in 5-minute buckets, so `samples_tracked` counts buckets, not readings.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
   A switch returning from `unavailable` is **not** treated as a manual action: it is a device
   reconnecting and reporting the state it already had. Without that distinction a brief network
@@ -443,16 +443,19 @@ cycle relative to `legionella_interval_days` (`Elevated` past one interval, `Hig
 numbers behind it are attributes, including `last_disinfection_at`, `hours_in_growth_band_7d`,
 `equivalent_log10_reduction_7d` and `max_temperature_7d`.
 
-Two more figures are entities of their own, so they keep history and can drive automations
+Three more figures are entities of their own, so they keep history and can drive automations
 directly:
 
+- **Disinfection Due**: when the interval lapses, as a timestamp. It changes only when a hold
+  completes, and dashboards count down to it by themselves. `unknown` until a cycle has been seen.
 - **Disinfection Due In**: days left before the interval lapses, negative once it is overdue.
   `unknown` until a cycle has been seen. (Named "Days Until Disinfection" in 3.0.0; existing
-  installs keep their entity ID.)
+  installs keep their entity ID.) Since 4.6.1 it keeps no long-term statistics: a countdown
+  changes only because the clock moves. Prefer Disinfection Due for new cards and automations.
 - **Disinfection Hold Progress**: minutes banked toward the current hour at 60 °C. It is live, so
   a manual high-temperature session can be watched as it accumulates.
 
-Both are diagnostic entities, as are Smart Eco State and Highest Temperature (7 days): they sit in
+All three are diagnostic entities, as are Smart Eco State and Highest Temperature (7 days): they sit in
 the device page's Diagnostic section, stay usable in automations and dashboards, and are left out of
 auto-generated dashboards and voice assistants.
 
@@ -550,6 +553,11 @@ already wants.
 until the time bound. That matters because a cancelled or abandoned cycle usually leaves the tank
 off, and an off tank never reports idle — so the "target reached" path could never fire and the
 full window would always elapse with the policy down for no live reason.
+
+A cycle that stands the policy down keeps it down for up to **8 hours** (4.6.1), not the
+`smart_eco_manual_off_resume_hours` bound a manual pause uses: heating a cold tank to 60 °C can take
+about as long as that bound on its own, before the hour's hold even starts. After 8 hours the cycle
+carries on, but only while the eco condition allows.
 
 If you want it to finish *faster*, choose `Once` rather than pausing Smart Eco by hand.
 It does the same thing — stands the policy down — but through `Off until target reached`, so the

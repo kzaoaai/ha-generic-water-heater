@@ -189,6 +189,19 @@ stored state; only the select labels changed. So completion is "a hold completed
 (`_cycle_completed_since_start`); reading "risk is Low" would end a cycle started on a Low tank the
 moment it began.
 
+A cycle that stands eco down (`_off_until_target_for_disinfection`) is bounded by
+`DISINFECTION_BYPASS_HOURS` (8 h, 4.6.1), not `smart_eco_manual_off_resume_hours`: at 3 h a 200 L /
+2 kW tank ran out of bypass short of 60 C and the cycle sat parked off, waiting for eco, until its
+3-day give-up (seen 2026-11-06 to -08).
+
+### The history sensors keep 5-minute buckets, not readings
+
+`_Bucket` (min, max, when it peaked) per `HISTORY_BUCKET`, stored as compact lists. Raw history
+cost ~600 KB of restore data per sensor and a recorder row per reading (`samples_tracked` counted
+readings). The hold never reads the history: it advances from `_last_sample`, the previous live
+reading, persisted separately. The 7-day sums leave out the bucket still filling and are cached
+until a bucket closes; the risk signal is dispatched only when the verdict, the last disinfection or
+the hold progress changes. History stored before 4.6.1 (raw samples) is read into buckets.
 ### `power_sensor` and `eco_gated` are a contract with another integration
 
 `power_sensor` is the configured meter on the element's circuit (or `None`), published only,
