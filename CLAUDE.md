@@ -39,6 +39,12 @@ turns an automation into a silent no-op.
 The legacy map is still required, separately, for restore: a select restores from its own last state
 *string*, so without it an upgrade quietly reads the default.
 
+The Smart Eco Mode select follows the same rule since 4.6.1: the heater owns the mode and restores
+it from its own attributes, `runtime["smart_eco_restored"]` tells the select whether to restore its
+own, and `adopt_restored_smart_eco_mode` takes it without a person's side effects. Before, the
+select restored unconditionally, so the platform set up last decided runtime and the select could
+show one mode while the heater enforced another.
+
 The Legionella select and the water heater both restore the policy, and since 2026.x the platforms
 set up in either order. The heater's own history wins; `runtime["legionella_restored"]` (absent
 until the heater has looked, `False` if it found nothing) tells the select whether to restore its
@@ -81,6 +87,32 @@ target. Any "has it finished?" test must exclude `load_shed` explicitly.
 
 Shedding outranks everything, including the eco policy's Always ON. It protects the supply; it is
 not a user preference.
+
+A shed is restored from the heater's own `load_shed` attribute (4.6.1), so a reload or a restart
+does not end it: the balancer reads that attribute to know what it has shed, and before 4.6.1 an
+options save during a shed re-energised the element while the balancer believed the supply was
+relieved.
+
+### A restart mid-dropout restores from the entity's own copy
+
+The heater publishes `unavailable` whenever its switch is off the network, and Home Assistant saves
+restore data every 15 minutes and at stop, so the last saved state can be `unavailable` with only
+capability attributes. `HeaterStoredData` (`extra_restore_state_data`) is built from internal state,
+which a dropout does not touch, and is used only when the published state is unusable; a usable
+published state still wins. It also carries `_off_until_target_for_disinfection`, which is not
+published. A new restored fact goes in the attributes (so the published path keeps working) and
+reaches the stored copy for free.
+
+### No reading, no heat — enforced in the control pass
+
+The failsafe is `_temperature_lost`: set when the sensor *reports* unavailable/unknown, cleared by
+the next reading, and while set `_async_control_heating` forces the switch off (past
+`min_on_duration`, like a shed) before any heating branch. It lives in the control pass because
+every retry and reconcile comes back through it: a one-off turn_off at the sensor event was undone
+by the same pass in `performance` (which needs no temperature), and an OFF deferred by `min_on` was
+retried through the missing-temperature skip and never sent. It is **not** set by "no reading yet":
+setup runs a control pass before it reads the sensor, and treating that as the failsafe cycled a
+heating relay off and on at every options save (`test_setup_before_the_first_reading_does_not_cycle_the_relay`).
 
 ### `performance` never reports idle
 
@@ -133,6 +165,14 @@ consumed within `OWN_ECHO_WINDOW`, 30 s — then control re-asserts intent); a s
 unavailable. The echo record **must expire**: without it, a lost OFF followed by a wall OFF later
 reads as our echo and the element comes back on, making OFF unreachable. Two genuine flips 50 ms
 apart still count as a person — nothing distinguishes a fast replay from a hand.
+
+A switch returning from unavailable is not a person, but it **does re-run control** (4.6.1): a
+command sent while it was unreachable is dropped (Home Assistant skips unavailable entities) and a
+relay can come back in either state, so before 4.6.1 a relay that reappeared ON stayed ON through a
+shed or an eco park until the next temperature reading. Only a real flip (`state_changed`, not a
+reappearance) stamps `_last_switch_change_time` or can be read as a manual override: an
+attribute-only update (rssi, power) restarted the min on/off clock on every update, and while an OFF
+was held back by `min_on` it was read as a manual ON.
 
 The stale-event branch was written against 2025.1, which delivered state listeners with
 `call_soon`, so two back-to-back writes produced an overtaken event. 2026.x runs them
@@ -252,9 +292,11 @@ deployed but the old behaviour persists, that is the first thing to check, not a
 .venv/bin/python -m pytest -q
 ```
 
-The test venv is Home Assistant 2026.10.2 on Python 3.14, the core production runs (since
-2026-10-23; it was 2025.1, then 2026.9.4 for a day, before production was found on 2026.10.2).
-Rebuild it with:
+The test venv is Home Assistant 2026.10.2 on Python 3.14. Production has run 2026.11.0 since
+2026-11-05, but on 2026-11-08 no `pytest-homeassistant-custom-component` release supported it
+(the newest, 0.13.375, pins 2026.10.4, and forcing 2026.11.0 under it fails to import: 2026.11
+aliases `httpx` to `httpx2`). 4.6.1 was run on 2026.10.2 and 2026.10.4. Move the venv to 2026.11
+as soon as a release for it exists. Rebuild it with:
 
 ```bash
 uv venv -p 3.14 .venv
@@ -351,11 +393,6 @@ be unit tested without an event loop. Keep new decision logic there and the plum
   sums in `_recalculate` still skip gaps over 30 min: only the hold has the exception.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
-- `water_heater.py` calls `device_registry.async_update_device(...,
-  remove_config_entry_id=...)`; current cores warn it stops working in 2027.8.0. Move to
-  `async_remove_device` / `new_config_entry_id`.
-- `manifest.json` `issue_tracker` points at `ha_generic_water_heater` (underscores); the repo is
-  `ha-generic-water-heater`, so the link is broken. Same for `documentation`, which points at core.
 
 ## Cloud and web sessions
 

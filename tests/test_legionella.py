@@ -592,3 +592,38 @@ def test_the_sensor_publishes_its_verdict_for_the_policy():
 def test_publishing_is_safe_without_a_runtime_or_hass():
     """A sensor built standalone must not explode on the hand-off."""
     build()._publish_risk()
+
+
+def test_a_never_disinfected_tank_escalates_with_a_long_interval():
+    """The verdict counts from the first sample ever seen, not the oldest kept.
+
+    History is pruned to 7 days, so measuring from the oldest retained sample
+    capped "how long have we watched" at 7 days: with a 10-day interval a tank
+    that never reached temperature read Unknown forever, and "As needed" never
+    started its first cycle.
+    """
+    sensor = build(interval_days=10)
+    day = 60 * 24
+    for minutes in range(0, 22 * day, 360):
+        sensor._async_add_sample(42.0, at(minutes))
+
+    with freeze_time(at(12 * day)):
+        sensor._recalculate()
+        assert sensor.native_value == STATE_ELEVATED
+    with freeze_time(at(22 * day)):
+        sensor._recalculate()
+        assert sensor.native_value == STATE_HIGH
+
+
+def test_first_observed_at_is_stored():
+    sensor = build(interval_days=10)
+    sensor._async_add_sample(42.0, at(0))
+    sensor._async_add_sample(43.0, at(60))
+    data = LegionellaStoredData.from_dict(sensor.extra_restore_state_data.as_dict())
+    assert data.first_observed_at == at(0).isoformat()
+
+    # Stored before 4.6.2: no key, read as unknown (setup then falls back to
+    # the oldest retained sample).
+    legacy = sensor.extra_restore_state_data.as_dict()
+    del legacy["first_observed_at"]
+    assert LegionellaStoredData.from_dict(legacy).first_observed_at is None

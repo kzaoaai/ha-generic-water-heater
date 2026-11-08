@@ -538,3 +538,78 @@ async def test_the_power_sensor_is_published_on_the_heater(
     state = hass.states.get("water_heater.upstairs")
     assert state is not None
     assert state.attributes["power_sensor"] == published
+
+
+async def test_a_relay_that_reappears_on_while_eco_parked_is_switched_back_off(hass, world):
+    """The reappearance re-runs control; the gate's OFF is put back.
+
+    With PV excess off, Smart Eco parks both tanks at OFF. A relay that comes
+    back from a dropout ON -- a power cycle, or an OFF sent while it was
+    unreachable -- used to stay ON, heating from the battery, until the next
+    temperature reading.
+    """
+    await setup_both(hass, stagger_seconds=0.0)
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+    upstairs = entities(hass)["Upstairs"]
+
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+    # Still not a person: no override, no pause, no promotion.
+    assert upstairs.state == STATE_OFF
+    assert upstairs._smart_eco_pause_reason is None
+
+
+async def test_a_relay_that_reappears_off_while_heating_is_switched_back_on(hass, world):
+    """The other direction: an ON that never reached the relay is re-sent."""
+    upstairs = await heating_upstairs(hass, world, 41.0)
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_OFF)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+    assert upstairs.state == STATE_ELECTRIC, "a reappearance was read as a manual OFF"
+    assert upstairs._smart_eco_pause_reason is None
+
+
+async def test_attribute_only_switch_updates_do_not_hold_off_a_deferred_off(hass, world):
+    """Only a real flip restarts the min on/off clock.
+
+    Every non-unavailable switch event used to stamp the last-change time, so a
+    switch publishing attributes (rssi, power) more often than min_on_duration
+    pushed a held OFF back forever and the tank ran to its mechanical cutout.
+    The control case is the same sequence with no attribute updates.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        await setup_both(hass, stagger_seconds=0.0, min_on_duration={"seconds": 120})
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+        # Eco goes false; min_on holds the OFF back.
+        hass.states.async_set(PV_EXCESS, STATE_OFF)
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON, "test premise"
+
+        upstairs = entities(hass)["Upstairs"]
+        for rssi in range(-51, -56, -1):
+            frozen.tick(timedelta(seconds=60))
+            # Same state, new attributes: what a switch reporting rssi sends.
+            current = hass.states.get(UPSTAIRS_SWITCH).state
+            hass.states.async_set(UPSTAIRS_SWITCH, current, {"rssi": rssi})
+            await hass.async_block_till_done()
+            async_fire_time_changed(hass, dt_util.utcnow())
+            await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF, (
+        "attribute-only updates kept restarting the min_on hold"
+    )
+    # Nor were they read as a person switching it back on.
+    assert upstairs._smart_eco_pause_reason is None
+    assert upstairs.state == STATE_OFF

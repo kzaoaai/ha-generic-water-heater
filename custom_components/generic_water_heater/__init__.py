@@ -284,12 +284,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    runtime[CONFIG_SNAPSHOT_KEY] = (dict(entry.data), dict(entry.options))
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     return True
 
 
+CONFIG_SNAPSHOT_KEY = "config_snapshot"
+
+
 async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update by reloading the config entry."""
+    """Reload when the configuration changed, and only then.
+
+    Update listeners also fire for a title change (renaming the entry in the
+    UI), and a reload is not free: it rebuilds the heater and drops what lives
+    only in memory -- timers, a deferred ON, the surplus window.
+    """
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    if runtime.get(CONFIG_SNAPSHOT_KEY) == (dict(entry.data), dict(entry.options)):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -320,13 +332,20 @@ def _has_entry_runtime(domain_data: dict) -> bool:
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate old config entries to the current format."""
+    # A newer entry (a downgrade) never reaches here: Home Assistant refuses an
+    # entry whose version is above the flow's VERSION before migrating.
     if entry.version >= 4:
         return True
 
     _LOGGER.debug("Migrating config entry %s from version %s", entry.entry_id, entry.version)
 
     new_data = _migrate_legacy_eco_config(entry.data)
-    new_options = _migrate_legacy_eco_config(entry.options)
+    # No defaults into options: options win over data in every reader, so a
+    # default written here shadowed what the entry was created with. An entry
+    # whose options form was never saved has options == {}, and its data could
+    # hold enable_max_temp_history_sensor / enable_debug_logging True -- the v3
+    # flow wrote both at creation -- which a False default then switched off.
+    new_options = _migrate_legacy_eco_config(entry.options, defaults=False)
 
     hass.config_entries.async_update_entry(
         entry,
@@ -337,7 +356,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-def _migrate_legacy_eco_config(config: dict) -> dict:
+def _migrate_legacy_eco_config(config: dict, *, defaults: bool = True) -> dict:
     """Convert legacy eco entity/value settings into a template condition."""
     updated = dict(config)
 
@@ -351,6 +370,9 @@ def _migrate_legacy_eco_config(config: dict) -> dict:
         updated[CONF_ECO_TEMPLATE] = (
             "{{ states(%r) == %r }}" % (eco_entity, compare_value)
         )
+
+    if not defaults:
+        return updated
 
     if CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR not in updated:
         updated[CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR] = False

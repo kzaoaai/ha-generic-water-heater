@@ -532,6 +532,10 @@ class LegionellaStoredData(SensorExtraStoredData):
     last_disinfection_at: str | None
     hold_seconds: float
     hold_open: bool
+    # When this sensor first saw the tank. The history is pruned to 7 days, so
+    # it cannot answer "how long have we been watching" for a tank that has
+    # never been disinfected (see _recalculate).
+    first_observed_at: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dict representation of the stored sensor data."""
@@ -541,6 +545,7 @@ class LegionellaStoredData(SensorExtraStoredData):
             "last_disinfection_at": self.last_disinfection_at,
             "hold_seconds": self.hold_seconds,
             "hold_open": self.hold_open,
+            "first_observed_at": self.first_observed_at,
         }
 
     @classmethod
@@ -567,6 +572,10 @@ class LegionellaStoredData(SensorExtraStoredData):
 
         hold_open = restored.get("hold_open") is True
 
+        first = restored.get("first_observed_at")
+        if not isinstance(first, str):
+            first = None
+
         return cls(
             extra.native_value,
             extra.native_unit_of_measurement,
@@ -574,6 +583,7 @@ class LegionellaStoredData(SensorExtraStoredData):
             last,
             hold_seconds,
             hold_open,
+            first,
         )
 
 
@@ -615,6 +625,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         self._interval = timedelta(days=max(1, int(interval_days)))
         self._history: list[tuple[datetime, float]] = []
         self._last_disinfection_at: datetime | None = None
+        self._first_observed_at: datetime | None = None
         # Progress of a disinfection hold currently in flight. Reset the moment
         # the temperature falls back below the threshold: a partial hold is not
         # banked, because partial treatment is the failure mode this is meant
@@ -693,6 +704,14 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
                     self._history.append((parsed, float(item["temperature"])))
                 except (KeyError, TypeError, ValueError):
                     continue
+            self._first_observed_at = (
+                dt_util.parse_datetime(stored.first_observed_at)
+                if stored.first_observed_at
+                else None
+            )
+            if self._first_observed_at is None and self._history:
+                # Stored before 4.6.2: the oldest sample is the best we know.
+                self._first_observed_at = min(ts for ts, _temp in self._history)
             self._restore_hold(stored, dt_util.utcnow())
             self._prune(dt_util.utcnow())
 
@@ -789,6 +808,7 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             else None,
             self._hold_seconds,
             self._hold_open,
+            self._first_observed_at.isoformat() if self._first_observed_at else None,
         )
 
     async def _async_get_last_data(self) -> LegionellaStoredData | None:
@@ -820,6 +840,8 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             return
 
         timestamp = when or dt_util.utcnow()
+        if self._first_observed_at is None:
+            self._first_observed_at = timestamp
         self._advance_hold(timestamp, temperature)
         self._history.append((timestamp, temperature))
         self._prune(timestamp)
@@ -978,9 +1000,15 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
 
         if self._last_disinfection_at is None:
             # Never seen a qualifying cycle. Stay Unknown until enough history
-            # has accumulated to make the silence meaningful.
+            # has accumulated to make the silence meaningful. Measured from the
+            # first sample this sensor ever saw, not the oldest one retained:
+            # the history is pruned to 7 days, so with an interval of 7 days or
+            # more the verdict could never leave Unknown, and "As needed" never
+            # started the first cycle on the tank that needed it most.
             observed = (
-                (now - self._history[0][0]) if self._history else timedelta(0)
+                (now - self._first_observed_at)
+                if self._first_observed_at is not None
+                else timedelta(0)
             )
             if observed < self._interval:
                 self._attr_native_value = STATE_UNKNOWN_RISK

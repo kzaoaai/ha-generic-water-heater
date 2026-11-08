@@ -194,4 +194,6 @@ async def test_a_4_3_link_changed_since_is_left_alone(hass, world):
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     assert dr.async_get(hass).async_get(relay.id).via_device_id == hub.id
-    assert await Store(hass, 1, f"{DOMAIN}.meter_links").async_load() == {}
+    # The record is dropped, and once none are left the file goes too (4.6.1),
+    # so later setups do not read an empty Store on every load.
+    assert await Store(hass, 1, f"{DOMAIN}.meter_links").async_load() is None

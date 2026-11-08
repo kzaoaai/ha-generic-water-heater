@@ -10,8 +10,10 @@ from datetime import timedelta
 
 from freezegun import freeze_time
 import pytest
-from homeassistant.components.water_heater import STATE_PERFORMANCE
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.components.water_heater import STATE_ELECTRIC, STATE_PERFORMANCE
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.core import State
+from pytest_homeassistant_custom_component.common import mock_restore_cache
 
 from custom_components.generic_water_heater import (
     DOMAIN,
@@ -222,3 +224,74 @@ async def test_shed_outranks_smart_eco_always_on(hass, world):
     assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
 
 
+
+
+async def test_a_shed_survives_a_reload(hass, world):
+    """An options save during a shed must not hand the supply its load back.
+
+    The balancer reads `load_shed` to know what it has shed. Before 4.6.1 a
+    reload came back un-shed and the control pass at the end of setup switched
+    the element straight back on, while the balancer still believed it had
+    relieved the supply.
+    """
+    live = await heating(hass, world)
+    upstairs_entry = next(
+        entry
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if entry.entry_id == live["Upstairs"]._entry_id
+    )
+    await shed(hass, UPSTAIRS)
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+    world["turn_on"].clear()
+
+    assert await hass.config_entries.async_reload(upstairs_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).attributes["load_shed"] is True
+    assert UPSTAIRS_SWITCH not in commanded(world["turn_on"]), (
+        "the reload re-energised a shed element"
+    )
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+    # And the release still ends it, as if the reload had never happened.
+    await release(hass, UPSTAIRS)
+    assert hass.states.get(UPSTAIRS).attributes["load_shed"] is False
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+async def test_a_shed_survives_a_restart(hass, world):
+    """Same contract across a restart: restored from the published attribute."""
+    mock_restore_cache(
+        hass,
+        (State(UPSTAIRS, STATE_ELECTRIC, {"temperature": 60, "load_shed": True}),),
+    )
+    await setup_both(hass, stagger_seconds=0.0)
+    hass.states.async_set(PV_EXCESS, STATE_ON)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS).attributes["load_shed"] is True
+    assert hass.states.get(UPSTAIRS).state == STATE_ELECTRIC
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+
+async def test_a_relay_that_reappears_on_during_a_shed_is_switched_back_off(hass, world):
+    """A dropout is not a person, but it is not the relay agreeing with us either.
+
+    The relay can come back ON -- a power cycle, or an OFF that was sent while
+    it was unreachable and so never arrived. Before 4.6.1 the reappearance was
+    only logged, and a shed element stayed energised until the next
+    temperature reading, which an idle tank may not send for half an hour.
+    """
+    await heating(hass, world)
+    await shed(hass, UPSTAIRS)
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF, (
+        "a shed element that reappeared ON was left drawing"
+    )
+    assert hass.states.get(UPSTAIRS).attributes["load_shed"] is True

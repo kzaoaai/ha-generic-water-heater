@@ -1,6 +1,8 @@
 """Support for generic water heater units."""
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.water_heater import (
@@ -22,7 +24,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, Event, EventStateChangedData, callback
+from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, Event, EventStateChangedData, State, callback
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers.event import (
     TrackTemplate,
@@ -37,7 +39,7 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import homeassistant.helpers.config_validation as cv
@@ -193,17 +195,20 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
             current_device_id = device_entry.id
 
-    # Cleanup old device links for this config entry
+    # Cleanup old device links for this config entry. Since 2026.9 a device
+    # belongs to exactly one config entry, so dropping ours from a device is
+    # removing it: async_remove_device, not update_device's
+    # remove_config_entry_id, which stops working in 2027.8.
     linked_devices = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
     for dev in linked_devices:
         if current_device_id and dev.id != current_device_id:
-            device_registry.async_update_device(dev.id, remove_config_entry_id=entry.entry_id)
+            device_registry.async_remove_device(dev.id)
         elif not current_device_id:
             # If no physical device is linked, ensure we don't keep links to old physical devices.
             # Check if it's the standalone device (identifier matches entry_id)
             is_standalone = any(dom == DOMAIN and ident == entry.entry_id for dom, ident in dev.identifiers)
             if not is_standalone:
-                device_registry.async_update_device(dev.id, remove_config_entry_id=entry.entry_id)
+                device_registry.async_remove_device(dev.id)
 
     entity = GenericWaterHeater(
         hass,
@@ -246,12 +251,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
     return True
 
 
-async def async_unload_entry(hass, entry):
-    """Unload a config entry for this platform."""
-    # Entities are removed automatically when the config entry is removed/unloaded
-    return True
-
-
 METER_LINK_STORE = f"{DOMAIN}.meter_links"
 
 
@@ -270,6 +269,11 @@ async def _async_link_meter_device(
     """
     store = Store(hass, 1, METER_LINK_STORE)
     loaded: dict = await store.async_load() or {}
+    if not loaded:
+        # Drained, or never written: remove the file, so later setups take the
+        # Store's no-file fast path instead of an executor read on every load.
+        await store.async_remove()
+        return
     mine = loaded.get(entry_id)
     if not mine:
         return
@@ -280,7 +284,48 @@ async def _async_link_meter_device(
         if dev is not None and dev.via_device_id == via:
             device_registry.async_update_device(device_id, via_device_id=None)
     links = {k: v for k, v in loaded.items() if k != entry_id}
-    await store.async_save(links)
+    if links:
+        await store.async_save(links)
+    else:
+        await store.async_remove()
+
+
+@dataclass
+class HeaterStoredData(ExtraStoredData):
+    """The heater's own view of its state, kept whether or not it is available.
+
+    The restore reads the last published state, and that is `unavailable`
+    whenever the switch was off the network when Home Assistant saved it (every
+    15 minutes, and at stop). Its attributes are then only the capability ones,
+    so a restart caught mid-dropout came back OFF with Smart Eco, any pause, a
+    running disinfection cycle, the eco switches and the target all lost. This
+    copy is built from the entity's internal state, which a dropout does not
+    touch, and is used when the published one is unusable. It also carries what
+    is not published at all.
+    """
+
+    state: str | None
+    attributes: dict[str, Any]
+    off_until_target_for_disinfection: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "attributes": self.attributes,
+            "off_until_target_for_disinfection": self.off_until_target_for_disinfection,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HeaterStoredData | None":
+        state = data.get("state")
+        attributes = data.get("attributes")
+        if not isinstance(state, str) or not isinstance(attributes, dict):
+            return None
+        return cls(
+            state,
+            attributes,
+            data.get("off_until_target_for_disinfection") is True,
+        )
 
 
 class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
@@ -367,6 +412,12 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._unit_of_measurement = unit
         self._current_operation = STATE_ELECTRIC
         self._current_temperature = None
+        # Set when the sensor REPORTS unavailable/unknown, cleared by the next
+        # reading; while set, control holds the element off (the failsafe).
+        # Not set merely because no reading has arrived yet: at setup control
+        # runs before the sensor is read, and on a restart the sensor's
+        # integration may load after this one.
+        self._temperature_lost = False
         self._operation_list = [
             STATE_ELECTRIC,
             STATE_OFF,
@@ -436,6 +487,17 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             "identifiers": {(DOMAIN, self._device_identifier)},
             "name": self._attr_name,
         }
+
+    @property
+    def extra_restore_state_data(self) -> HeaterStoredData:
+        """The internal state, for a restore whose published state is unusable."""
+        attributes = dict(self.extra_state_attributes)
+        attributes[ATTR_TEMPERATURE] = self._target_temperature
+        return HeaterStoredData(
+            self._current_operation,
+            attributes,
+            self._off_until_target_for_disinfection,
+        )
 
     @property
     def extra_state_attributes(self):
@@ -579,6 +641,23 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         call landing here is unambiguously a person, so it is safe to treat as
         manual intent.
         """
+        # Always ON ignores an OFF -- checked first, so an OFF it is going to
+        # ignore has no side effects: it used to end a running disinfection
+        # cycle (and set the policy to Off) on the way to being ignored. The
+        # one OFF it takes is the wall switch's: that starts the documented
+        # timed Always ON override (manual_off_timer) before landing here, and
+        # an override that was announced but then ignored brought the element
+        # back on after min_off, making the wall OFF unreachable.
+        if (
+            operation_mode == STATE_OFF
+            and self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON
+            and self._has_eco_condition()
+            and self._smart_eco_pause_reason is None
+        ):
+            self._debug_log("ignoring manual OFF operation while Smart Eco mode is Always ON")
+            await self._async_control_heating()
+            return
+
         # A person changing the mode mid-cycle takes the tank back. Ending the
         # cycle here rather than only in the select is what stops two things:
         # an orphaned _disinfecting flag that never clears, and -- far worse --
@@ -617,15 +696,6 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     "manual_off" if operation_mode == STATE_OFF else "manual_on",
                     source="operation_mode",
                 )
-
-        if (
-            operation_mode == STATE_OFF
-            and self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON
-            and self._has_eco_condition()
-        ):
-            self._debug_log("ignoring manual OFF operation while Smart Eco mode is Always ON")
-            await self._async_control_heating()
-            return
 
         self._current_operation = operation_mode
         _LOGGER.debug("%s: async_set_operation_mode -> mode=%s", self.name, self._current_operation)
@@ -890,6 +960,21 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._debug_log("disinfection: ended (%s), back to %s", reason, prior)
 
     @callback
+    def adopt_restored_smart_eco_mode(self, mode: str) -> None:
+        """Take the Smart Eco mode the select restored, when we restored none.
+
+        Not ``async_set_smart_eco_mode``: that is a person choosing, with the
+        side effects of one (clearing a pause, notifying). A restore is not.
+        """
+        if mode not in SMART_ECO_MODES:
+            return
+        self._smart_eco_mode = mode
+        self._runtime["smart_eco_mode"] = mode
+        if self.hass is not None:
+            self._update_smart_eco_state()
+            self.async_write_ha_state()
+            self.hass.async_create_task(self._async_control_heating())
+
     def adopt_restored_legionella_mode(self, mode: str) -> None:
         """Take the policy the select restored, when we restored none.
 
@@ -1126,6 +1211,22 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             )
 
         old_state = await self.async_get_last_state()
+        extra = await self.async_get_last_extra_data()
+        stored = HeaterStoredData.from_dict(extra.as_dict()) if extra is not None else None
+        if stored is not None:
+            # Published state unusable (saved mid-dropout, see HeaterStoredData):
+            # restore from the entity's own copy instead. Otherwise the
+            # published state stays the source, as it always has been.
+            if old_state is None or old_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                self._debug_log(
+                    "restore: last state was %s; using the stored copy (%s)",
+                    None if old_state is None else old_state.state,
+                    stored.state,
+                )
+                old_state = State(self.entity_id, stored.state, stored.attributes)
+            self._off_until_target_for_disinfection = (
+                stored.off_until_target_for_disinfection
+            )
         if old_state is not None:
             if old_state.attributes.get(ATTR_TEMPERATURE) is not None:
                 self._target_temperature = float(old_state.attributes.get(ATTR_TEMPERATURE))
@@ -1218,6 +1319,33 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                     else dt_util.utcnow().isoformat()
                 )
 
+            # A shed is the balancer's to end, not a reload's. Before this an
+            # options save, a reload or a restart during a shed came back
+            # un-shed and energised the element on a supply the balancer
+            # believed it had relieved; it reads `load_shed` to decide, so it
+            # saw the tank as drawing again and could only shed it a second
+            # time on its next pass. Restored as published, the release (or a
+            # person asking for heat) ends it, exactly as before the restart.
+            if old_state.attributes.get("load_shed") is True:
+                self._load_shed = True
+                self._debug_log("load shed: restored from before the reload/restart")
+
+            # A short-boost lockout runs its 30 minutes whatever happens in
+            # between; a restart inside it used to let the boost start at once.
+            restored_lockout = old_state.attributes.get("surplus_boost_locked_until")
+            locked_until = (
+                dt_util.parse_datetime(restored_lockout)
+                if isinstance(restored_lockout, str)
+                else None
+            )
+            if locked_until is not None and locked_until > dt_util.utcnow():
+                self._surplus_boost_locked_until = locked_until
+                self._surplus_boost_lockout_timer = async_call_later(
+                    self.hass,
+                    (locked_until - dt_util.utcnow()).total_seconds(),
+                    self._async_surplus_boost_lockout_ended,
+                )
+
         # The policy select restores from its own history too, and since
         # 2026.x the platforms set up in either order. If we had nothing of our
         # own, take what the select already restored; if it has not run yet,
@@ -1231,6 +1359,20 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 self._runtime.get("legionella_mode", LEGIONELLA_MODE_OFF)
             )
         self._runtime["legionella_restored"] = restored_policy
+
+        # Smart Eco mode, the same way: the heater's own history wins. Before
+        # 4.6.1 the Smart Eco select restored it from its own last state as
+        # well, unconditionally, so whichever platform set up last decided
+        # what runtime held -- and the select could then show one mode while
+        # the heater enforced another. If we restored none and the select has
+        # not run yet, this
+        # flag tells it to restore and hand us the value. (A select that ran
+        # first has already been read: __init__ takes the mode from runtime.)
+        restored_eco_mode = old_state is not None and (
+            old_state.attributes.get("smart_eco_mode") in SMART_ECO_MODES
+            or isinstance(old_state.attributes.get("smart_eco_enabled"), bool)
+        )
+        self._runtime["smart_eco_restored"] = restored_eco_mode
 
         # Ensure target temperature is set if not restored (e.g. new entity)
         if self._target_temperature is None:
@@ -1291,6 +1433,10 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
 
         self._async_refresh_eco_condition()
         async_dispatcher_send(self.hass, eco_switches_signal(self._entry_id))
+        # Let the Smart Eco select show what was restored, whichever order.
+        async_dispatcher_send(
+            self.hass, smart_eco_signal(self._device_identifier), self._smart_eco_mode
+        )
         self._update_smart_eco_state()
         # Evaluate first: a cycle that should be running must own the mode
         # before the control pass acts on it, or the pass commands the tank on
@@ -1326,18 +1472,24 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
         if value is None or value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            # Failsafe
+            # Failsafe. The control pass at the end of this method switches
+            # the element off and holds it off for as long as the reading is
+            # missing (see _async_control_heating). Turning it off here alone
+            # was not enough: in PERFORMANCE that same pass switched it straight
+            # back on, and an OFF deferred by min_on_duration was retried
+            # through a pass that skipped control for want of a temperature.
             _LOGGER.warning(
                 "No Temperature information, entering Failsafe, turning off heater %s",
                 self.heater_entity_id,
             )
-            await self._async_heater_turn_off()
             self._current_temperature = None
+            self._temperature_lost = True
         else:
             try:
                 self._current_temperature = float(value)
             except (TypeError, ValueError):
                 return
+            self._temperature_lost = False
 
         _LOGGER.debug(
             "%s: sensor changed -> current_temperature=%s, target=%s, cold_tolerance=%s, hot_tolerance=%s",
@@ -1617,16 +1769,28 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 self._current_operation,
             )
 
-            self._last_switch_change_time = dt_util.utcnow()
+            now = dt_util.utcnow()
+            state_changed = old_state is not None and old_state.state != new_state.state
+            # A device coming back from unavailable is reporting the state it
+            # already had -- see the override chain below.
+            returned_from_unavailable = old_state is None or old_state.state in (
+                STATE_UNAVAILABLE,
+                STATE_UNKNOWN,
+            )
+            # Only a real flip restarts the min on/off clock. An attribute-only
+            # update (rssi, power) arrives here too, and stamping it pushed a
+            # held OFF back by the full min_on_duration on every update: a
+            # switch that reports attributes faster than that never turned off.
+            # A reappearance is not a flip either; stamping it would delay the
+            # reconcile pass it triggers below.
+            if state_changed and not returned_from_unavailable:
+                self._last_switch_change_time = now
             # Manual and externally driven flips energise the same inverter
             # whether or not the fleet ever admitted them.
             if new_state.state == STATE_ON:
-                self._fleet.note_switch_on(
-                    self._entry_id, self._last_switch_change_time
-                )
+                self._fleet.note_switch_on(self._entry_id, now)
             else:
                 self._fleet.note_switch_off(self._entry_id)
-            state_changed = old_state is not None and old_state.state != new_state.state
             had_pending = self._pending_switch_state is not None
 
             # If we have no record of what we last commanded, seed from old_state so we
@@ -1655,10 +1819,7 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             # This is the same exclusion the baseline-seeding line above already
             # applies; it simply was never applied to the override branches.
             # A genuine flip still arrives as a real off -> on transition.
-            returned_from_unavailable = old_state is None or old_state.state in (
-                STATE_UNAVAILABLE,
-                STATE_UNKNOWN,
-            )
+            # (returned_from_unavailable is computed at the top of this branch.)
 
             if self._startup_grace_active and state_changed:
                 # A device reconnecting after a restart can replay states: on
@@ -1698,13 +1859,29 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
                 if new_state.state != self._last_commanded_switch_state:
                     self.hass.async_create_task(self._async_control_heating())
             elif returned_from_unavailable:
+                # Not a person -- but not proof the relay agrees with us
+                # either. A command sent while the switch was unavailable is
+                # dropped (Home Assistant skips unavailable entities), and a
+                # relay can come back in either state. Left alone, a relay that
+                # reappeared ON stayed ON through a load shed, or with Smart Eco
+                # parking the tank, until the next temperature reading -- which
+                # an idle tank may not send for half an hour. Re-run control so
+                # the switch is put back where the intent says, the same way
+                # the own-echo branch above re-asserts it.
                 self._debug_log(
-                    "switch reappeared as %s after %s; not treating as manual intent",
+                    "switch reappeared as %s after %s; not treating as manual intent, re-asserting control",
                     new_state.state,
                     "no previous state" if old_state is None else old_state.state,
                 )
+                self.hass.async_create_task(self._async_control_heating())
             elif (
-                self._last_commanded_switch_state is not None
+                # A person flips the switch; an attribute-only update (rssi,
+                # power) does not. Without this, a switch that publishes
+                # attributes while an OFF is held back by min_on_duration --
+                # baseline already OFF, relay still ON -- was read as a manual
+                # ON: a Smart Eco pause and a tank that kept heating.
+                state_changed
+                and self._last_commanded_switch_state is not None
                 and new_state.state != self._last_commanded_switch_state
             ):
                 _LOGGER.debug("Manual switch override detected: %s", new_state.state)
@@ -2309,6 +2486,24 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self.async_write_ha_state()
             return
 
+        # Failsafe: the sensor reported it has no reading, so no heat until it
+        # has one again. Held here, in the control pass, rather than only where
+        # the sensor reports, because every retry and reconcile comes back
+        # through this pass: PERFORMANCE needs no temperature to decide and
+        # switched the element straight back on, and an OFF deferred by
+        # min_on_duration was retried through the missing-temperature skip
+        # below and never sent. Forced past min_on_duration for the same reason
+        # a shed is. A disinfection cycle cannot bank its hold without a
+        # reading either; its give-up bound, checked at the top, still runs.
+        if self._temperature_lost:
+            _LOGGER.debug("%s: temperature reading lost, holding the heater off", self.name)
+            self._debug_log("decision: temperature reading lost -> switch OFF (failsafe)")
+            await self._async_heater_turn_off(force=True)
+            self._debug_log_hvac_action("failsafe: no temperature")
+            self._update_smart_eco_state()
+            self.async_write_ha_state()
+            return
+
         # Logic for PERFORMANCE: Heat continuously while not blocked by Smart Eco.
         if self._current_operation == STATE_PERFORMANCE:
             _LOGGER.debug("%s: operation is PERFORMANCE, turning ON", self.name)
@@ -2319,7 +2514,9 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self.async_write_ha_state()
             return
 
-        # If we don't have the required temperature information, just update state
+        # No reading yet (setup runs control before the sensor is read, and a
+        # restart may load the sensor's integration after this one), or no
+        # target: just update state.
         if (
             self._current_temperature is None
             or self._target_temperature is None

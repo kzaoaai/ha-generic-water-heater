@@ -161,9 +161,20 @@ class GenericWaterHeaterSmartEcoSelect(SelectEntity, RestoreEntity):
         """Restore state and subscribe to Smart Eco updates."""
         await super().async_added_to_hass()
 
-        if (old_state := await self.async_get_last_state()) is not None:
-            if old_state.state in _OPTION_TO_MODE:
-                self._runtime["smart_eco_mode"] = _OPTION_TO_MODE[old_state.state]
+        # The heater owns the mode and restores it from its own history; this
+        # restore is only a fallback for a heater that had none.
+        # "smart_eco_restored" is absent until the heater has looked.
+        heater_restored = self._runtime.get("smart_eco_restored")
+        if (
+            heater_restored is not True
+            and (old_state := await self.async_get_last_state()) is not None
+            and old_state.state in _OPTION_TO_MODE
+        ):
+            mode = _OPTION_TO_MODE[old_state.state]
+            self._runtime["smart_eco_mode"] = mode
+            heater = self._runtime.get("water_heater_entity")
+            if heater_restored is False and heater is not None:
+                heater.adopt_restored_smart_eco_mode(mode)
 
         self._runtime["smart_eco_select_entity"] = self
         self.async_on_remove(lambda: self._runtime.pop("smart_eco_select_entity", None))

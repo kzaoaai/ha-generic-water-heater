@@ -120,7 +120,8 @@
     },
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
-      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on."
+      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay."
     }
   },
   "options": {
@@ -244,7 +245,18 @@
     },
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
-      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on."
+      "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay."
+    }
+  },
+  "services": {
+    "shed": {
+      "name": "Shed for load balancing",
+      "description": "Drop this water heater for load shedding without disturbing user intent. The operation mode and Smart Eco policy are left untouched, so releasing the shed resumes exactly what was configured. Outranks Smart Eco \"Always ON\". A person asking for heat clears the shed."
+    },
+    "release": {
+      "name": "Release load shed",
+      "description": "Release a load shed previously applied with the shed service and resume the operation mode and Smart Eco policy the heater already had. Does nothing if the heater is not shed."
     }
   }
 }

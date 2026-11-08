@@ -1,16 +1,12 @@
 {
   "domain": "generic_water_heater",
-  "documentation": "https://www.home-assistant.io/integrations/generic_water_heater",
-  "issue_tracker": "https://github.com/kzaoaai/ha_generic_water_heater/issues",
+  "name": "Generic Water Heater",
   "codeowners": [
     "@kzaoaai"
   ],
-  "name": "Generic Water Heater",
-  "version": "4.6.0",
-  "dependencies": [
-    "sensor",
-    "select"
-  ],
   "config_flow": true,
-  "iot_class": "local_push"
+  "documentation": "https://github.com/kzaoaai/ha-generic-water-heater#readme",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/kzaoaai/ha-generic-water-heater/issues",
+  "version": "4.6.1"
 }

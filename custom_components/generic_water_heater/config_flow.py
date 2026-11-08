@@ -255,6 +255,24 @@ def _power_sensor_errors(hass, flat: dict) -> dict:
     return {}
 
 
+def _heater_in_use_errors(hass, flat: dict, own_entry_id: str | None = None) -> dict:
+    """Refuse a switch another entry already drives.
+
+    Two heaters on one switch fight over the relay: each reads the other's
+    commands as a person at the wall, and each joins the fleet as a separate
+    element. Nothing else stops it, since entries are keyed by their own id.
+    """
+    heater = flat.get(CONF_HEATER)
+    if not heater:
+        return {}
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.entry_id == own_entry_id:
+            continue
+        if {**entry.data, **entry.options}.get(CONF_HEATER) == heater:
+            return {"base": "heater_already_configured"}
+    return {}
+
+
 def _surplus_boost_errors(flat: dict) -> dict:
     """Refuse a boost the heater could never act on.
 
@@ -316,7 +334,11 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             flat = _apply_cleared_and_defaults(user_input)
-            errors = _power_sensor_errors(self.hass, flat) or _surplus_boost_errors(flat)
+            errors = (
+                _heater_in_use_errors(self.hass, flat)
+                or _power_sensor_errors(self.hass, flat)
+                or _surplus_boost_errors(flat)
+            )
             if not errors:
                 return self.async_create_entry(title=flat[CONF_NAME], data=flat)
             return self.async_show_form(
@@ -334,7 +356,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current = {**self.config_entry.data, **self.config_entry.options}
         if user_input is not None:
             flat = _apply_cleared_and_defaults(user_input)
-            errors = _power_sensor_errors(self.hass, flat) or _surplus_boost_errors(flat)
+            errors = (
+                _heater_in_use_errors(self.hass, flat, self.config_entry.entry_id)
+                or _power_sensor_errors(self.hass, flat)
+                or _surplus_boost_errors(flat)
+            )
             if not errors:
                 return self.async_create_entry(title="", data=flat)
             return self.async_show_form(

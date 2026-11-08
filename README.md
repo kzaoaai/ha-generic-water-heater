@@ -14,11 +14,18 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   reconnecting and reporting the state it already had. Without that distinction a brief network
   dropout could be read as "someone flipped it on", promoting `electric` to `performance` and
   running the element to the tank's own mechanical cutout. A genuine flip still arrives as a real
-  `off` -> `on` transition and behaves exactly as before.
+  `off` -> `on` transition and behaves exactly as before. The reconnect does re-run control, so a
+  relay that comes back in the wrong state (a power cycle, or a command sent while it was
+  unreachable) is put back where the heater's mode, Smart Eco and any load shed say it should be.
+  Attribute-only updates from the switch (signal strength, power) are not flips either: they
+  neither count as a person nor restart the minimum on/off timers.
 - Always ON temporary override behavior for manual underlying switch changes, with an override state, an absolute resume time and persistent notifications.
 - Minimum on and off durations to avoid rapid switching.
+- One heater per switch: the config and options forms refuse a switch another entry already drives.
 - Fleet load coordination across every instance, so several heaters cannot step onto a shared inverter or generator at the same moment.
-- Failsafe shutdown when the temperature sensor becomes unavailable.
+- Failsafe shutdown when the temperature sensor becomes unavailable or unknown, in every heating
+  mode (including `performance` and a disinfection cycle) and without waiting for the minimum on
+  duration. The element stays off until the sensor reports a reading again.
 - Automatic device linking to the same device as the controlled switch when possible.
 
 ## Heating Logic
@@ -192,6 +199,9 @@ Behaviour while shed:
   physical switch all clear the shed. A request to turn the heater *off* does not clear it; it has
   nothing to win, and clearing on an ignored OFF could switch the element back on.
 - The heater reports `load_shed: true` and a Smart Eco state of `Shed by load balancer`.
+- A shed survives a reload (an options save) and a Home Assistant restart: only a release, or a
+  person asking for heat, ends it. A switch that drops off the network and comes back on during a
+  shed is switched off again.
 
 ## Smart Eco Mode
 
@@ -339,6 +349,9 @@ of the eco condition, and do not want to remember to switch the policy back on.
 Always ON temporary override details:
 
 - Trigger: manual toggle of the underlying heater switch (for example, panel/smart-breaker action).
+  A switch-off at the wall keeps the tank off for the override; an OFF from the entity itself (the
+  UI, Apple Home, an automation) is still ignored, and being ignored it changes nothing else -- a
+  running disinfection cycle carries on.
 - Duration: uses `smart_eco_manual_off_resume_hours`.
 - State sensor: shows `Always ON override (Paused by manual control)`.
 - Notifications: Home Assistant persistent notifications are created when override starts and when policy resumes.
