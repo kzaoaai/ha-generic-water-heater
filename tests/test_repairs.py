@@ -72,16 +72,61 @@ async def test_a_lasting_switch_outage_is_raised_and_clears_itself(hass, world):
         assert issue(hass, "heater_switch_unavailable", upstairs) is None
 
 
+def failsafe_warnings(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Failsafe" in r.getMessage()
+    ]
+
+
 async def test_the_failsafe_warns_once_per_outage(hass, world, caplog):
-    await setup_both(hass)
-    with caplog.at_level(logging.WARNING):
-        for _ in range(3):
+    with freeze_time(TRIGGER) as frozen:
+        await setup_both(hass)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                hass.states.async_set(UPSTAIRS_SENSOR, STATE_UNAVAILABLE)
+                await hass.async_block_till_done()
+                hass.states.async_set(UPSTAIRS_SENSOR, "unknown")
+                await hass.async_block_till_done()
+            await tick(hass, frozen, 3)
+    warnings = failsafe_warnings(caplog)
+    assert len(warnings) == 1, f"{len(warnings)} failsafe warnings for one outage"
+
+
+async def test_a_reading_back_within_two_minutes_is_not_a_warning(hass, world, caplog):
+    """A restart's late-loading sensor: unavailable, unknown, then its reading.
+
+    The failsafe still acts at once -- only the warning waits.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        await setup_both(hass)
+        hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+        await hass.async_block_till_done()
+        with caplog.at_level(logging.WARNING):
             hass.states.async_set(UPSTAIRS_SENSOR, STATE_UNAVAILABLE)
             await hass.async_block_till_done()
+            assert hass.states.get(UPSTAIRS_SWITCH).state == "off", "failsafe acts at once"
             hass.states.async_set(UPSTAIRS_SENSOR, "unknown")
             await hass.async_block_till_done()
-    warnings = [r for r in caplog.records if "entering Failsafe" in r.getMessage()]
-    assert len(warnings) == 1, f"{len(warnings)} failsafe warnings for one outage"
+            await tick(hass, frozen, 1)
+            hass.states.async_set(UPSTAIRS_SENSOR, "41.0")
+            await hass.async_block_till_done()
+            await tick(hass, frozen, 5)
+    assert failsafe_warnings(caplog) == []
+
+
+async def test_a_later_outage_warns_again(hass, world, caplog):
+    with freeze_time(TRIGGER) as frozen:
+        await setup_both(hass)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(2):
+                hass.states.async_set(UPSTAIRS_SENSOR, STATE_UNAVAILABLE)
+                await hass.async_block_till_done()
+                await tick(hass, frozen, 3)
+                hass.states.async_set(UPSTAIRS_SENSOR, "41.0")
+                await hass.async_block_till_done()
+    assert len(failsafe_warnings(caplog)) == 2
 
 
 async def test_a_give_up_repair_clears_when_the_policy_changes(hass, world):

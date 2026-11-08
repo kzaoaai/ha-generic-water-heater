@@ -146,6 +146,12 @@ DISINFECTION_BYPASS_HOURS = 8
 # drops off the network many times a day and comes straight back); ten minutes
 # is not, and while the sensor is down the failsafe holds the tank off.
 OUTAGE_REPAIR_AFTER = timedelta(minutes=10)
+# How long the temperature reading may be missing before the failsafe is logged
+# as a warning. The failsafe itself acts at once; only the log waits. On a
+# restart a sensor whose integration loads later reports unavailable, then
+# unknown, then its reading -- about a minute on a real install -- and that
+# routine gap was a warning on every restart.
+FAILSAFE_WARN_AFTER = timedelta(minutes=2)
 ISSUE_TEMPERATURE_SENSOR = "temperature_sensor_unavailable"
 ISSUE_SWITCH = "heater_switch_unavailable"
 ISSUE_DISINFECTION_GAVE_UP = "disinfection_gave_up"
@@ -443,6 +449,8 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
         self._temperature_lost = False
         self._sensor_outage_timer = None
         self._switch_outage_timer = None
+        self._failsafe_warn_timer = None
+        self._failsafe_warned = False
         self._operation_list = [
             STATE_ELECTRIC,
             STATE_OFF,
@@ -1510,11 +1518,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             self._surplus_boost_lockout_timer,
             self._sensor_outage_timer,
             self._switch_outage_timer,
+            self._failsafe_warn_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
         self._sensor_outage_timer = None
         self._switch_outage_timer = None
+        self._failsafe_warn_timer = None
         self._surplus_boost_lockout_timer = None
         self._cooldown_timer = None
         self._smart_eco_resume_timer = None
@@ -1564,6 +1574,35 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             async_call_later(self.hass, OUTAGE_REPAIR_AFTER.total_seconds(), _raise),
         )
 
+    def _start_failsafe_warning(self) -> None:
+        """Warn about the failsafe if the reading is still missing later."""
+        if self._failsafe_warn_timer is not None or self.hass is None:
+            return
+
+        @callback
+        def _warn(_now) -> None:
+            self._failsafe_warn_timer = None
+            if not self._temperature_lost:
+                return
+            self._failsafe_warned = True
+            _LOGGER.warning(
+                "No Temperature information for %d minutes, in Failsafe, "
+                "holding heater %s off",
+                FAILSAFE_WARN_AFTER.total_seconds() // 60,
+                self.heater_entity_id,
+            )
+
+        self._failsafe_warn_timer = async_call_later(
+            self.hass, FAILSAFE_WARN_AFTER.total_seconds(), _warn
+        )
+
+    @callback
+    def _end_failsafe_warning(self) -> None:
+        if self._failsafe_warn_timer is not None:
+            self._failsafe_warn_timer()
+            self._failsafe_warn_timer = None
+        self._failsafe_warned = False
+
     @callback
     def _end_outage_watch(self, what: str) -> None:
         attr = "_sensor_outage_timer" if what == "sensor" else "_switch_outage_timer"
@@ -1587,10 +1626,14 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             if not self._temperature_lost:
                 # Once per outage: it used to warn on every unavailable or
                 # unknown report, which a flapping sensor repeats for hours.
-                _LOGGER.warning(
-                    "No Temperature information, entering Failsafe, turning off heater %s",
+                # And only once the outage has lasted: see FAILSAFE_WARN_AFTER.
+                _LOGGER.debug(
+                    "%s: no temperature information, entering Failsafe, "
+                    "turning off heater %s",
+                    self.name,
                     self.heater_entity_id,
                 )
+                self._start_failsafe_warning()
                 self._start_outage_watch("sensor")
             self._current_temperature = None
             self._temperature_lost = True
@@ -1600,9 +1643,13 @@ class GenericWaterHeater(WaterHeaterEntity, RestoreEntity):
             except (TypeError, ValueError):
                 return
             if self._temperature_lost:
-                _LOGGER.info(
-                    "%s: temperature reading is back, leaving Failsafe", self.name
+                # Only worth an INFO line when the entry was worth a WARNING.
+                _LOGGER.log(
+                    logging.INFO if self._failsafe_warned else logging.DEBUG,
+                    "%s: temperature reading is back, leaving Failsafe",
+                    self.name,
                 )
+                self._end_failsafe_warning()
                 self._end_outage_watch("sensor")
             self._temperature_lost = False
 

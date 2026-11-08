@@ -293,7 +293,10 @@ move. Any new entity goes through it.
 The temperature sensor or the heater switch unavailable for `OUTAGE_REPAIR_AFTER` (10 min) raises a
 repair that clears itself on return; a disinfection give-up raises one that clears when a cycle
 starts or the policy changes. Short dropouts raise nothing: a relay here drops many times a day.
-The failsafe warning is logged once per outage, not per report. `async_remove_entry` deletes this
+The failsafe warning is logged once per outage, not per report, and only once the reading has been
+missing for `FAILSAFE_WARN_AFTER` (2 min); the failsafe itself still acts at once. On a restart a
+late-loading sensor goes unavailable, unknown, then reads, about a minute later (seen 2026-11-08),
+which warned on every restart before. `async_remove_entry` deletes this
 heater's repairs. The "Off until target" time bound still notifies: it is an event, not a
 condition to fix.
 
