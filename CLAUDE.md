@@ -442,7 +442,8 @@ the same pattern.
   while a tank sat idle at its boost target, and the hold stalled (seen 2026-10-23: 10.8 min, then
   34+ min of silence). Not yet seen completing a hold on hardware. The window, growth and kill-credit
   sums in `_recalculate` still skip gaps over 30 min: only the hold has the exception.
-- 4.6.3's insights and forecast pre-heat are new and unproven on hardware:
+- 4.6.3's insights and forecast pre-heat have been live on prod since the 2026-11-09 restart, but
+  not yet seen doing their job on hardware (no heating run had happened yet):
   - Heat-up Rate learns only from runs of 10+ minutes that rise 1+ C, with a 0.3 moving average.
     "Drawing" is the meter at 100 W or more, or the switch on when there is no meter. A shower
     mid-run reads slow; the average absorbs it rather than rejecting the run.
@@ -455,6 +456,12 @@ the same pattern.
 - The heater shows unavailable only after its switch has been away for
   `SWITCH_UNAVAILABLE_AFTER` (2 min). Inside that window it keeps controlling: commands to an
   unavailable switch fail and the next pass retries. The outage repair is still at 10 min.
+  Seen on hardware once: a 1 s relay dropout at startup left the heater available.
+- AA's own dashboard has a `custom:button-card` template (`water_heater_tank`) that builds sensor
+  ids from the heater's object id plus fixed suffixes (`_ready_at`, `_smart_eco_state`,
+  `_energy_today_*`, `_element_fault`, `_hot_water_in_use`, `_days_until_disinfection`,
+  `_legionella_risk`) and reads the `heading_for` attribute and the heater's `disinfection_active`
+  and `surplus_boost_active` attributes. Renaming any of them breaks that card silently.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 
