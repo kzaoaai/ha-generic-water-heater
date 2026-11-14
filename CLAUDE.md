@@ -189,6 +189,10 @@ stored state; only the select labels changed. So completion is "a hold completed
 (`_cycle_completed_since_start`); reading "risk is Low" would end a cycle started on a Low tank the
 moment it began.
 
+There is deliberately no service or button that records a disinfection by hand. It would reset
+the risk clock with no heat behind it, which is the false "safe" this model refuses everywhere
+else. The manual reset is a real cycle: choose `Once`. (Asked for and declined 2026-11-14.)
+
 A cycle that stands eco down (`_off_until_target_for_disinfection`) is bounded by
 `DISINFECTION_BYPASS_HOURS` (8 h, 4.6.1), not `smart_eco_manual_off_resume_hours`: at 3 h a 200 L /
 2 kW tank ran out of bypass short of 60 C and the cycle sat parked off, waiting for eco, until its
@@ -448,7 +452,8 @@ the same pattern.
   disinfection cycle run to the tank's mechanical thermostat, which opens the circuit with the
   relay still closed (seen 2026-11-14: 54.2 min banked, cutout at 64.7 C with the relay on, 37 min
   of silence at 64+ C, hold stalled). The meter is credited only for the hold, never for control.
-  A tank with no meter still stalls this way. Neither path yet seen completing a hold on hardware.
+  A tank with no meter still stalls this way. 4.6.4 has been live on prod since the 2026-11-14
+  restart; neither path yet seen completing a hold on hardware.
 - 4.6.3's insights and forecast pre-heat have been live on prod since the 2026-11-09 restart, but
   not yet seen doing their job on hardware (no heating run had happened yet):
   - Heat-up Rate learns only from runs of 10+ minutes that rise 1+ C, with a 0.3 moving average.
