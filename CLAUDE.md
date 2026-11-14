@@ -204,8 +204,9 @@ until a bucket closes; the risk signal is dispatched only when the verdict, the 
 the hold progress changes. History stored before 4.6.1 (raw samples) is read into buckets.
 ### `power_sensor` and `eco_gated` are a contract with another integration
 
-`power_sensor` is the configured meter on the element's circuit (or `None`), published only,
-never read for control. `eco_gated` is `True` only while the heat depends on the Smart Eco
+`power_sensor` is the configured meter on the element's circuit (or `None`), published, and
+never read for control. Two read-only diagnostics read it as evidence: Element Fault, and since
+4.6.4 the disinfection hold's element-off check. `eco_gated` is `True` only while the heat depends on the Smart Eco
 condition — it would stop if the condition went false (`_eco_gated`: policy enforcing, the
 condition true and the startup grace over, `electric`, no disinfection, not shed). A battery runtime estimate in another integration
 leaves an `eco_gated` heater's metered draw out of what the battery must carry when the
@@ -440,8 +441,14 @@ the same pattern.
   off now and `last_changed` no later than the gap's start) and both readings are at or above 60 C.
   Before it, a sensor reporting only on ~0.5 C steps went silent past `MAX_CREDITED_GAP` (30 min)
   while a tank sat idle at its boost target, and the hold stalled (seen 2026-10-23: 10.8 min, then
-  34+ min of silence). Not yet seen completing a hold on hardware. The window, growth and kill-credit
-  sums in `_recalculate` still skip gaps over 30 min: only the hold has the exception.
+  34+ min of silence). The window, growth and kill-credit sums in `_recalculate` still skip gaps
+  over 30 min: only the hold has the exception.
+  Since 4.6.4 the configured meter is evidence too: below `NO_DRAW_W` now and `last_changed` no
+  later than the gap's start. The switch alone cannot see the commonest case: PERFORMANCE and a
+  disinfection cycle run to the tank's mechanical thermostat, which opens the circuit with the
+  relay still closed (seen 2026-11-14: 54.2 min banked, cutout at 64.7 C with the relay on, 37 min
+  of silence at 64+ C, hold stalled). The meter is credited only for the hold, never for control.
+  A tank with no meter still stalls this way. Neither path yet seen completing a hold on hardware.
 - 4.6.3's insights and forecast pre-heat have been live on prod since the 2026-11-09 restart, but
   not yet seen doing their job on hardware (no heating run had happened yet):
   - Heat-up Rate learns only from runs of 10+ minutes that rise 1+ C, with a 0.3 moving average.

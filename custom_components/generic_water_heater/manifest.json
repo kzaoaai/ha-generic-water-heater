@@ -9,5 +9,5 @@
   "integration_type": "helper",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/kzaoaai/ha-generic-water-heater/issues",
-  "version": "4.6.3"
+  "version": "4.6.4"
 }

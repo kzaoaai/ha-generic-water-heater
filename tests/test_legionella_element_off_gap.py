@@ -13,7 +13,10 @@ from freezegun import freeze_time
 import pytest
 from homeassistant.const import STATE_OFF, STATE_ON
 
-from custom_components.generic_water_heater import CONF_ENABLE_LEGIONELLA_SENSOR
+from custom_components.generic_water_heater import (
+    CONF_ENABLE_LEGIONELLA_SENSOR,
+    CONF_POWER_SENSOR,
+)
 from custom_components.generic_water_heater.sensor import (
     MAX_CREDITED_GAP,
     MAX_ELEMENT_OFF_GAP,
@@ -164,3 +167,129 @@ async def test_the_switch_check_reads_off_and_unchanged_since(hass):
         assert check(at(15)) is False, "unavailable is not off"
 
     assert _element_off_since(hass, None)(at(0)) is False
+
+
+# --- 4.6.4: the meter is evidence too -------------------------------------
+#
+# PERFORMANCE and a disinfection cycle run the tank to its own mechanical
+# thermostat, which opens the circuit with the relay still closed. The switch
+# then reads ON for the whole coast, so the switch alone never credits it.
+# Seen 2026-11-14: 54.2 min banked, the thermostat cut out at 64.7 C, the
+# sensor went silent for 37 min at 64+ C, and the hold stalled.
+
+
+async def test_the_meter_check_reads_no_draw_and_unchanged_since(hass):
+    from homeassistant.const import STATE_UNAVAILABLE
+
+    from custom_components.generic_water_heater.sensor import _element_off_since
+
+    check = _element_off_since(hass, "switch.element", "sensor.element_power")
+    with freeze_time(BASE) as frozen:
+        hass.states.async_set("switch.element", STATE_ON)
+        assert check(at(0)) is False, "relay on and no meter reading"
+
+        hass.states.async_set("sensor.element_power", "1200.0", {"unit_of_measurement": "W"})
+        frozen.tick(timedelta(minutes=10))
+        assert check(at(5)) is False, "drawing is not off"
+
+        hass.states.async_set("sensor.element_power", "0.0", {"unit_of_measurement": "W"})  # at 10
+        assert check(at(5)) is False, "it was drawing for part of the gap"
+        assert check(at(10)) is True, "relay on, thermostat open: the meter decides"
+        assert check(at(15)) is True
+
+        frozen.tick(timedelta(minutes=10))
+        hass.states.async_set("sensor.element_power", STATE_UNAVAILABLE)
+        assert check(at(25)) is False, "unavailable is not off"
+
+        frozen.tick(timedelta(minutes=1))
+        hass.states.async_set("sensor.element_power", "0.5", {"unit_of_measurement": "kW"})
+        assert check(at(30)) is False, "0.5 kW is 500 W, a draw"
+
+        frozen.tick(timedelta(minutes=1))
+        hass.states.async_set("sensor.element_power", "0.01", {"unit_of_measurement": "kW"})
+        assert check(at(30)) is True, "10 W is standby noise, below NO_DRAW_W"
+
+        frozen.tick(timedelta(minutes=1))
+        hass.states.async_set("sensor.element_power", "-5", {"unit_of_measurement": "W"})
+        assert check(at(40)) is False, "a negative reading is not evidence"
+
+    assert _element_off_since(hass, "switch.element", None)(at(0)) is False
+
+
+async def _setup_metered(hass):
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+    hass.states.async_set(METER, "1200.0", {"unit_of_measurement": "W"})
+    hass.states.async_set(UPSTAIRS_SENSOR, "61.0", {"device_class": "temperature"})
+    # PERFORMANCE holds the relay closed whatever the reading; the tank's own
+    # thermostat is what stops it.
+    entry = build_entry(
+        "Upstairs", UPSTAIRS_SWITCH, UPSTAIRS_SENSOR, target_temp=40.0,
+        **{CONF_ENABLE_LEGIONELLA_SENSOR: True, CONF_POWER_SENSOR: METER},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        "water_heater", "set_operation_mode",
+        {"entity_id": "water_heater.upstairs", "operation_mode": "performance"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+METER = "sensor.upstairs_element_power"
+
+
+async def test_end_to_end_the_seen_case_completes_on_the_meter(hass, world):  # noqa: F811
+    """Relay on throughout; the meter reads 0 from 2 min before the silence."""
+    with freeze_time(BASE) as frozen:
+        await _setup_metered(hass)
+        # Bank 48 min while heating, reading every 6 min.
+        for _ in range(8):
+            frozen.tick(timedelta(minutes=6))
+            hass.states.async_set(
+                UPSTAIRS_SENSOR,
+                f"{61.0 + 0.4 * (_ + 1):.2f}",
+                {"device_class": "temperature"},
+            )
+            await hass.async_block_till_done()
+        assert _progress(hass) == pytest.approx(48, abs=0.1)
+
+        # The thermostat opens the circuit; the relay stays closed.
+        frozen.tick(timedelta(minutes=4))
+        hass.states.async_set(METER, "0.0", {"unit_of_measurement": "W"})
+        frozen.tick(timedelta(minutes=2))
+        hass.states.async_set(UPSTAIRS_SENSOR, "64.72", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert _progress(hass) == pytest.approx(54, abs=0.1)
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+        frozen.tick(timedelta(minutes=37))
+        hass.states.async_set(UPSTAIRS_SENSOR, "64.2", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        risk = hass.states.get("sensor.upstairs_legionella_risk")
+        assert risk.attributes["last_disinfection_at"] is not None
+        assert risk.attributes["hold_in_progress"] is False
+
+
+async def test_end_to_end_a_draw_inside_the_gap_is_not_credited(hass, world):  # noqa: F811
+    """The thermostat closed again mid-gap: the meter changed, no credit."""
+    with freeze_time(BASE) as frozen:
+        await _setup_metered(hass)
+        hass.states.async_set(METER, "0.0", {"unit_of_measurement": "W"})
+        frozen.tick(timedelta(minutes=1))
+        hass.states.async_set(UPSTAIRS_SENSOR, "61.1", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        banked = _progress(hass)
+
+        frozen.tick(timedelta(minutes=10))
+        hass.states.async_set(METER, "1200.0", {"unit_of_measurement": "W"})
+        frozen.tick(timedelta(minutes=5))
+        hass.states.async_set(METER, "0.0", {"unit_of_measurement": "W"})
+
+        frozen.tick(timedelta(minutes=LONG))
+        hass.states.async_set(UPSTAIRS_SENSOR, "60.6", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+        assert _progress(hass) == pytest.approx(banked)

@@ -56,7 +56,7 @@ from . import (
     smart_eco_state_signal,
 )
 from .temperature_tracking import async_track_filtered_temperature
-from .element_health import to_watts
+from .element_health import NO_DRAW_W, to_watts
 from .energy_split import SOURCES
 from .insights import (
     EnergySplitTracker,
@@ -269,25 +269,48 @@ STATE_ELEVATED = "Elevated"
 STATE_HIGH = "High"
 
 
-def _element_off_since(hass, heater_entity_id: str | None) -> Callable[[datetime], bool]:
-    """Return a check: has the heater switch been off since a given time?
+def _element_off_since(
+    hass, heater_entity_id: str | None, power_sensor_entity_id: str | None = None
+) -> Callable[[datetime], bool]:
+    """Return a check: has the element been off since a given time?
 
-    Read from the switch's own state: off now, and last changed no later than
-    the time asked about. Anything else reads False - unavailable or unknown is
-    not off, and any change inside the gap (on and back off, a dropout and
-    back) moves last_changed past it. A restart resets last_changed, so a gap
-    across one is never credited this way.
+    Two independent pieces of evidence, either of which is enough:
+
+    - The heater switch: off now, and last changed no later than the time
+      asked about.
+    - The configured meter (4.6.4): reading below ``NO_DRAW_W`` now, and last
+      changed no later than the time asked about. This is the case the switch
+      cannot see: PERFORMANCE and a disinfection cycle run the tank to its own
+      mechanical thermostat on purpose, so the relay stays closed while the
+      thermostat has opened the circuit and the tank coasts. Seen 2026-11-14:
+      54.2 min banked, the thermostat cut out at 64.7 C with the relay on, the
+      sensor then went silent for 37 min at 64+ C, and the hold stalled.
+      Read only as evidence for a hold, never for control.
+
+    Anything else reads False - unavailable, unknown or non-numeric is not off,
+    and any change inside the gap (on and back off, a dropout and back, a
+    meter reporting a draw) moves last_changed past it. A restart resets
+    last_changed, so a gap across one is never credited this way.
     """
 
-    def check(since: datetime) -> bool:
-        if not heater_entity_id:
+    def _unchanged_since(entity_id: str | None, since: datetime, is_off) -> bool:
+        if not entity_id:
             return False
-        state = hass.states.get(heater_entity_id)
-        return (
-            state is not None
-            and state.state == STATE_OFF
-            and state.last_changed <= since
-        )
+        state = hass.states.get(entity_id)
+        return state is not None and state.last_changed <= since and is_off(state)
+
+    def _meter_reads_no_draw(state) -> bool:
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return False
+        unit = state.attributes.get("unit_of_measurement")
+        return 0.0 <= to_watts(value, unit) < NO_DRAW_W
+
+    def check(since: datetime) -> bool:
+        return _unchanged_since(
+            heater_entity_id, since, lambda state: state.state == STATE_OFF
+        ) or _unchanged_since(power_sensor_entity_id, since, _meter_reads_no_draw)
 
     return check
 
@@ -398,7 +421,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 runtime=hass.data.setdefault(DOMAIN, {}).setdefault(
                     entry.entry_id, {}
                 ),
-                element_off_since=_element_off_since(hass, heater_entity_id),
+                element_off_since=_element_off_since(
+                    hass,
+                    heater_entity_id,
+                    (data.get(CONF_POWER_SENSOR) or "").strip() or None,
+                ),
             )
         )
         for detail in (
