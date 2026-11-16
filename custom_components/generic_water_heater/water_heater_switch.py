@@ -1,5 +1,6 @@
 """Heater switch control, outage/failsafe timers and issues for GenericWaterHeater."""
 import logging
+from datetime import timedelta
 from homeassistant.components.water_heater import STATE_PERFORMANCE, STATE_ELECTRIC
 from homeassistant.const import (
     ATTR_ENTITY_ID,
@@ -11,7 +12,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import DOMAIN as HA_DOMAIN, callback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
 from homeassistant.helpers import issue_registry as ir
 import homeassistant.util.dt as dt_util
 from . import DOMAIN, SMART_ECO_MODE_OFF_UNTIL_TARGET
@@ -461,6 +462,7 @@ class SwitchControlMixin:
                         lower_threshold,
                     )
                     await self.async_set_operation_mode(STATE_PERFORMANCE)
+                    self._start_manual_performance_bound()
             elif self._current_operation == STATE_ELECTRIC:
                 # Manual ON while electric would stay idle means user wants immediate heat.
                 if not self._electric_mode_wants_heating():
@@ -472,6 +474,7 @@ class SwitchControlMixin:
                         else self._target_temperature - self._cold_tolerance,
                     )
                     await self.async_set_operation_mode(STATE_PERFORMANCE)
+                    self._start_manual_performance_bound()
                 else:
                     self._log_debug_decision(
                         "manual switch ON while ELECTRIC already requests heat (rare mismatch path; current=%s <= target-cold=%s); no mode remap needed",
@@ -495,6 +498,86 @@ class SwitchControlMixin:
                 self._current_operation,
             )
             await self.async_set_operation_mode(STATE_OFF)
+
+    def _start_manual_performance_bound(self) -> None:
+        """Bound the performance run a wall-switch ON just promoted the tank to.
+
+        A flip at the wall while electric would idle means heat now, hence the
+        promotion. Nothing used to end it: performance holds the element on
+        without reading the temperature, no Smart Eco pause or timer touches
+        the operation mode, and the promotion was recorded as the heating mode
+        the eco gate restores, so it came back after every park. One press of
+        a button became an unbounded performance run, this integration's worst
+        failure. Now it reverts to electric after
+        smart_eco_manual_off_resume_hours, the length of the manual pause the
+        same flip starts, and what the eco gate restores is electric.
+
+        Not during a disinfection cycle: that performance is the cycle's, and
+        so is smart_eco_last_heating_mode, which carries it across the eco gap.
+        Writing electric there left a parked cycle restored as electric, which
+        stops at target and cannot bank a hold.
+        """
+        if self._disinfecting:
+            return
+        self._manual_performance_until = dt_util.utcnow() + timedelta(
+            hours=self._smart_eco_manual_off_resume_hours
+        )
+        self._smart_eco_last_heating_mode = STATE_ELECTRIC
+        self._runtime["smart_eco_last_heating_mode"] = STATE_ELECTRIC
+        self._arm_manual_performance_timer()
+        self._debug_log(
+            "wall-switch performance run bounded until %s",
+            self._manual_performance_until.isoformat(),
+        )
+        self.async_write_ha_state()
+
+    def _arm_manual_performance_timer(self) -> None:
+        """Schedule the end of a wall-switch performance run at its deadline."""
+        if self._manual_performance_timer is not None:
+            self._manual_performance_timer()
+        self._manual_performance_timer = async_track_point_in_utc_time(
+            self.hass,
+            self._async_manual_performance_due,
+            self._manual_performance_until,
+        )
+
+    def _clear_manual_performance_bound(self) -> None:
+        """Forget a wall-switch performance run's deadline and its timer."""
+        if self._manual_performance_timer is not None:
+            self._manual_performance_timer()
+        self._manual_performance_timer = None
+        self._manual_performance_until = None
+
+    async def _async_manual_performance_due(self, _now) -> None:
+        """The deadline passed: end the run whatever the clock reads now."""
+        self._manual_performance_timer = None
+        self._end_manual_performance(expired=True)
+        await self._async_control_heating()
+
+    def _end_manual_performance(self, expired: bool = False) -> None:
+        """End a wall-switch performance run that is over.
+
+        Run at the top of every control pass, before any branch can return, as
+        the other bounds are. A run that already ended another way (a person
+        set a mode, the eco gate parked the tank) or that a disinfection cycle
+        now owns just loses its deadline: the cycle's performance is the
+        cycle's to end.
+        """
+        until = self._manual_performance_until
+        if until is None:
+            return
+        if self._disinfecting or self._current_operation != STATE_PERFORMANCE:
+            self._clear_manual_performance_bound()
+            return
+        if not expired and dt_util.utcnow() < until:
+            return
+        _LOGGER.info(
+            "%s: performance from the wall switch ended after %s h; back to electric",
+            self.name,
+            self._smart_eco_manual_off_resume_hours,
+        )
+        self._clear_manual_performance_bound()
+        self._current_operation = STATE_ELECTRIC
 
     def _electric_mode_wants_heating(self) -> bool:
         """Return whether ELECTRIC mode would currently request heat."""
@@ -562,6 +645,7 @@ class SwitchControlMixin:
         # return, and a bound that only runs when control happens to reach the
         # bottom is not a bound.
         self._async_check_off_until_target()
+        self._end_manual_performance()
 
         # Load shedding outranks everything, including Smart Eco's Always ON
         # policy: it protects the supply, it is not a user preference. It is
@@ -632,6 +716,10 @@ class SwitchControlMixin:
                 if self._current_operation != STATE_OFF:
                     self._debug_log("decision: smart eco blocks heating -> setting operation mode OFF")
                     self._current_operation = STATE_OFF
+                # A wall-switch performance run parked here is over: the
+                # restore below brings electric back. Drop its deadline now
+                # rather than publish one for a tank that is off.
+                self._clear_manual_performance_bound()
                 await self._async_heater_turn_off()
                 self._update_smart_eco_state()
                 self._debug_log_hvac_action("smart eco blocked")

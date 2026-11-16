@@ -79,6 +79,11 @@ Related trap: `set_operation_mode` does not touch `smart_eco_last_heating_mode` 
 whatever is in there — possibly `performance` — is what a restore resumes. An unbounded
 `performance` run is this integration's worst failure mode and has happened twice.
 
+Leaving a parked OFF is itself a heating boundary change, and `set_operation_mode` pauses Smart Eco
+for it with the timed countdown. `turn_on` pauses first, the until-satisfied way, and passes
+`eco_already_paused=True` so the second pause does not replace it. Until 2026-11-16 it did, so the
+until-satisfied bypass could not be reached from a parked tank, the state ON is most often pressed in.
+
 ### A load shed is not a satisfied tank
 
 `hvac_action` reports `off` only when the *operation mode* is off. A shed deliberately leaves the
@@ -119,6 +124,18 @@ heating relay off and on at every options save (`test_setup_before_the_first_rea
 It holds the element on unconditionally and the appliance's mechanical thermostat is what stops it,
 which Home Assistant never sees. Any mechanism that waits for `hvac_action == "idle"` will wait
 forever on that path and needs a time bound as well.
+
+A wall-switch ON while `electric` would idle promotes the tank to `performance` (heat now). Until
+2026-11-16 nothing ended that run: the control pass returns before reading the temperature, no eco
+pause or timer touches the mode, and the promotion was written to `smart_eco_last_heating_mode`, so
+the eco gate brought it back after every park. It is now bounded by
+`smart_eco_manual_off_resume_hours` (`_manual_performance_until`, published as
+`manual_performance_until` and restored as a deadline, never restarted), checked by a timer and at
+the top of every control pass, and the promotion writes `electric` to `smart_eco_last_heating_mode`.
+Two exceptions, each pinned by a test: a disinfection cycle owns its `performance` and that field, so
+a flip during a cycle sets no bound and writes nothing; and any `set_operation_mode` clears the
+bound, because `performance` a person chooses as the mode is deliberate and stays unbounded. A new
+path into `performance` that is not a person choosing it needs the same treatment.
 
 ### Power balancing is not this integration's job (since 2.0.0)
 

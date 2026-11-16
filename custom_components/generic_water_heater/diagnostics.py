@@ -67,6 +67,7 @@ async def async_get_config_entry_diagnostics(
                     "_surplus_boost_lockout_timer",
                     "_sensor_outage_timer",
                     "_switch_outage_timer",
+                    "_manual_performance_timer",
                 )
             },
             "attributes": heater.extra_state_attributes,

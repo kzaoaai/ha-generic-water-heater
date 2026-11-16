@@ -69,6 +69,12 @@ Operation behavior:
 - `electric`: follows the threshold logic above.
 - `performance`: keeps the element on regardless of the target temperature, until the tank's own mechanical
   thermostat stops it. It never reports `idle`. Not the same as the surplus boost below.
+- Turning the heater's switch on by hand (at the device or the panel) while `electric` would stay idle
+  reads as "heat now" and moves the tank to `performance`. That run is bounded: after
+  `smart_eco_manual_off_resume_hours` it goes back to `electric`, and the heater's
+  `manual_performance_until` attribute says when. Smart Eco brings back `electric`, not `performance`,
+  after parking the tank. `performance` chosen as the mode (the UI, Apple Home, an automation) is not
+  bounded, and a disinfection cycle keeps its own.
 - Smart Eco Mode: applies policy behavior described below.
 
 ### Sensor glitch filtering
@@ -332,7 +338,9 @@ Under `Auto Resume after Delay` there is a **one-shot bypass**, and it is the pl
 from every other manual action: instead of the timed pause, Smart Eco pauses with **no deadline**,
 the tank heats on `electric` regardless of the eco condition, and the policy **resumes by itself** once
 the tank has reached target and stayed idle for a minute. The Smart Eco State sensor reads
-`Paused until the tank is satisfied` while that is in effect.
+`Paused until the tank is satisfied` while that is in effect. This includes pressing ON on a tank
+Smart Eco has parked at `off`, the usual state while it blocks (that case used to get the timed pause
+instead).
 
 Use it when you want hot water now and do not want to remember to switch the policy back on. Turning
 the tank **off**, or changing the operation mode, takes the *timed* path instead

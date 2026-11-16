@@ -492,6 +492,11 @@ class GenericWaterHeater(
         # Whether the bypass was taken out FOR a disinfection cycle, so that
         # ending the cycle can hand it straight back.
         self._off_until_target_for_disinfection = False
+        # When the performance run a wall-switch ON promoted the tank to goes
+        # back to electric (water_heater_switch.py), or None. Absolute, so a
+        # restart keeps the bound instead of restarting it.
+        self._manual_performance_until: datetime | None = None
+        self._manual_performance_timer = None
         # expose unique_id for the entity
         try:
             self._attr_unique_id = f"{DOMAIN}_{self._device_identifier}"
@@ -543,6 +548,13 @@ class GenericWaterHeater(
             "smart_eco_previous_mode": self._smart_eco_previous_mode,
             "smart_eco_off_until_target_since": (
                 self._smart_eco_off_until_target_since
+            ),
+            # When a performance run the wall switch asked for reverts to
+            # electric, or None. A deadline, like smart_eco_resume_at.
+            "manual_performance_until": (
+                self._manual_performance_until.isoformat()
+                if self._manual_performance_until is not None
+                else None
             ),
             # The meter on this element's circuit, or None. A contract with
             # consumers outside this integration (a battery runtime estimate
@@ -657,12 +669,17 @@ class GenericWaterHeater(
         _LOGGER.debug("%s: async_set_temperature -> target=%s", self.name, self._target_temperature)
         await self._async_control_heating()
 
-    async def async_set_operation_mode(self, operation_mode):
+    async def async_set_operation_mode(self, operation_mode, *, eco_already_paused=False):
         """Set new operation mode.
 
         Now that an external load balancer uses the shed/release services, a
         call landing here is unambiguously a person, so it is safe to treat as
         manual intent.
+
+        ``eco_already_paused`` is for callers that have just paused Smart Eco
+        for this same action themselves (turn_on): leaving an eco-parked OFF
+        is a heating boundary change, and pausing again here replaced
+        turn_on's until-satisfied pause with the timed one.
         """
         # Always ON ignores an OFF -- checked first, so an OFF it is going to
         # ignore has no side effects: it used to end a running disinfection
@@ -680,6 +697,10 @@ class GenericWaterHeater(
             self._debug_log("ignoring manual OFF operation while Smart Eco mode is Always ON")
             await self._async_control_heating()
             return
+
+        # Any mode a person sets replaces a wall-switch performance run and its
+        # bound; the promotion itself re-arms the bound after this call.
+        self._clear_manual_performance_bound()
 
         # A person changing the mode mid-cycle takes the tank back. Ending the
         # cycle here rather than only in the select is what stops two things:
@@ -705,7 +726,12 @@ class GenericWaterHeater(
             )
         )
 
-        if self._has_eco_condition() and old_mode != operation_mode and is_heating_boundary_change:
+        if (
+            not eco_already_paused
+            and self._has_eco_condition()
+            and old_mode != operation_mode
+            and is_heating_boundary_change
+        ):
             if self._smart_eco_mode == SMART_ECO_MODE_AUTO_RESUME:
                 await self._async_pause_smart_eco_for_manual_override(
                     "manual_off" if operation_mode == STATE_OFF else "manual_on",
@@ -735,7 +761,12 @@ class GenericWaterHeater(
 
         self._clear_load_shed("turn_on")
         await self._async_pause_smart_eco_for_manual_override("manual_on", source="turn_on")
-        await self.async_set_operation_mode(STATE_ELECTRIC)
+        # Paused already, and on purpose the until-satisfied way. From a tank
+        # the eco gate had parked at OFF (its usual state while blocked), the
+        # mode change below is a heating boundary change, which paused again
+        # with the timed countdown: the until-satisfied pause could not be
+        # reached from the state a person most often presses ON in.
+        await self.async_set_operation_mode(STATE_ELECTRIC, eco_already_paused=True)
 
     async def async_turn_off(self, **kwargs):
         """Turn the entity off."""
@@ -944,6 +975,12 @@ class GenericWaterHeater(
                     else dt_util.utcnow().isoformat()
                 )
 
+            # A wall-switch performance run keeps its deadline across a
+            # restart; restarting the clock would extend it every time.
+            restored_until = old_state.attributes.get("manual_performance_until")
+            if isinstance(restored_until, str):
+                self._manual_performance_until = dt_util.parse_datetime(restored_until)
+
             # A shed is the balancer's to end, not a reload's. Before this an
             # options save, a reload or a restart during a shed came back
             # un-shed and energised the element on a supply the balancer
@@ -1051,6 +1088,17 @@ class GenericWaterHeater(
         # stop it. Reconcile the two restored facts against each other first.
         if self._disinfecting and self._legionella_mode == LEGIONELLA_MODE_OFF:
             self._end_disinfection("policy was off at restart")
+        elif (
+            not self._disinfecting
+            and self._current_operation == STATE_PERFORMANCE
+            and self._manual_performance_until is not None
+        ):
+            # Past its deadline already: the control pass below ends it.
+            self._debug_log(
+                "restored a wall-switch performance run, bounded until %s",
+                self._manual_performance_until.isoformat(),
+            )
+            self._arm_manual_performance_timer()
         elif not self._disinfecting and self._current_operation == STATE_PERFORMANCE:
             self._debug_log(
                 "restored performance without an active cycle; leaving it alone"
@@ -1085,9 +1133,11 @@ class GenericWaterHeater(
             self._switch_outage_timer,
             self._failsafe_warn_timer,
             self._switch_unavailable_timer,
+            self._manual_performance_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
+        self._manual_performance_timer = None
         self._sensor_outage_timer = None
         self._switch_outage_timer = None
         self._failsafe_warn_timer = None
