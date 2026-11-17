@@ -471,6 +471,12 @@ the same pattern.
   of silence at 64+ C, hold stalled). The meter is credited only for the hold, never for control.
   A tank with no meter still stalls this way. 4.6.4 has been live on prod since the 2026-11-14
   restart; neither path yet seen completing a hold on hardware.
+- 4.6.5 has been live on prod since the restart of 2026-11-16 22:04 UTC. Both heaters came back
+  with their state (one mid timed pause, its deadline kept) and publish `manual_performance_until`.
+  Neither fix has been seen on hardware yet. What to look for: a wall-switch ON on a tank above
+  target minus the cold tolerance moves it to `performance` with `manual_performance_until` set
+  `smart_eco_manual_off_resume_hours` ahead, and it returns to `electric` at that time; ON pressed
+  on a tank the eco gate has parked reads `Paused until the tank is satisfied`.
 - 4.6.3's insights and forecast pre-heat have been live on prod since the 2026-11-09 restart, but
   not yet seen doing their job on hardware (no heating run had happened yet):
   - Heat-up Rate learns only from runs of 10+ minutes that rise 1+ C, with a 0.3 moving average.
@@ -493,6 +499,34 @@ the same pattern.
   and `surplus_boost_active` attributes. Renaming any of them breaks that card silently.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
+- An external review (2026-11-16) was checked finding by finding: a code trace, a repro test, and a
+  second reviewer trying to overturn each verdict. 4.6.5 fixed its two real behaviour bugs. Verified
+  and still open, all low:
+  - With cold tolerance 0, a reading exactly at the boost target turns the element on (the ON test
+    comes first), so a boost stops one reading above its target, not at it.
+    `test_the_boost_stops_at_its_own_target` injects 61.5 and does not see it. Fix for the boost
+    only: test "at or above the upper threshold" first.
+  - Ready At recomputes only on `heat_rate_signal`, so `heading_for` and the estimate stay stale
+    after a target, boost or disinfection goal change until the next tank reading.
+  - Heat-up Rate is labelled `°C/h` whatever the unit system. `DISINFECTION_GOAL_C` also looks
+    unconverted in `heating_goal()` on a Fahrenheit install (read, not tested).
+  - `set_temperature` drops an `operation_mode` sent with it. Core requires the temperature, so the
+    target cannot be wiped that way.
+  - A non-numeric or non-finite tank state does not set the failsafe. Home Assistant refuses such a
+    state from a temperature sensor, so it needs a source the config flow's selector does not
+    offer; `nan` and `inf` parse as floats. If hardened, do it in `temperature_tracking.py`.
+  - `to_watts` knows only `kW` and `MW`, exact case. Do not casefold: `mW` and `MW` differ.
+  - The fleet object is dropped, with its departed anchors, when every entry unloads, so the
+    stagger anchor does not survive a reload of all entries at once. One entry's reload is fine.
+  - `diagnostics.py` `timers_armed` omits `_failsafe_warn_timer` and `_switch_unavailable_timer`;
+    `water_heater.py` ends with an empty `# --- Repairs ---` header, and `min_temp` / `max_temp`
+    each carry a second, dead docstring.
+
+  Checked and wrong, so not to be re-derived: the short-run boost lockout being skipped after a
+  restart (`_surplus_window_start` is always set before `_boost_heating_since` can be), and the
+  meter's `last_changed` check defeating the 4.6.4 hold credit. The second is true only of a meter
+  that jitters while idle, and it stalls the hold, the safe direction; judging by the current
+  reading alone would credit a gap the element drew in.
 
 ## Cloud and web sessions
 
