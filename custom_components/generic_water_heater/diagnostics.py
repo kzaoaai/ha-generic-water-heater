@@ -68,6 +68,7 @@ async def async_get_config_entry_diagnostics(
                     "_sensor_outage_timer",
                     "_switch_outage_timer",
                     "_failsafe_warn_timer",
+                    "_first_reading_timer",
                     "_switch_unavailable_timer",
                     "_manual_performance_timer",
                 )

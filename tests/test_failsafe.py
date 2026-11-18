@@ -13,9 +13,23 @@ from datetime import timedelta
 from freezegun import freeze_time
 import pytest
 from homeassistant.components.water_heater import STATE_ELECTRIC, STATE_PERFORMANCE
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
+from homeassistant.core import CoreState, State
 import homeassistant.util.dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from pytest_homeassistant_custom_component.common import (
+    async_fire_time_changed,
+    mock_restore_cache,
+)
+
+from custom_components.generic_water_heater.water_heater_const import (
+    FIRST_READING_WITHIN,
+)
 
 from tests.test_integration_setup import (  # noqa: F401  (fixtures)
     PV_EXCESS,
@@ -205,3 +219,239 @@ async def test_a_tank_state_that_is_not_a_number_at_startup_is_no_reading_yet(
     hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
     await hass.async_block_till_done()
     assert upstairs.current_temperature == 41.0
+
+
+# --- no first reading ---------------------------------------------------------
+
+
+async def loaded_with_no_reading(hass, sensor_state, mode=STATE_ELECTRIC):
+    """Both entries loaded with the upstairs element already on and no reading.
+
+    A restart mid-heat: the relay kept its state, the tank sensor has nothing.
+    """
+    hass.states.async_set(PV_EXCESS, STATE_ON)
+    hass.states.async_set(UPSTAIRS_SWITCH, STATE_ON)
+    if sensor_state is None:
+        hass.states.async_remove(UPSTAIRS_SENSOR)
+    else:
+        hass.states.async_set(UPSTAIRS_SENSOR, sensor_state, {"device_class": "temperature"})
+    mock_restore_cache(hass, (State(UPSTAIRS, mode, {"temperature": 60}),))
+    await setup_both(hass, stagger_seconds=0.0)
+    upstairs = entities(hass)["Upstairs"]
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON, "test premise: found on"
+    assert not upstairs._temperature_lost, "test premise: no reading yet is not lost"
+    return upstairs
+
+
+async def after(hass, start, delay):
+    async_fire_time_changed(hass, start + delay)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize("sensor_state", [STATE_UNKNOWN, STATE_UNAVAILABLE, "nan", None])
+@pytest.mark.parametrize("mode", [STATE_ELECTRIC, STATE_PERFORMANCE])
+async def test_an_element_found_on_with_no_reading_is_stopped_after_the_wait(
+    hass, world, mode, sensor_state
+):
+    """"No reading yet" used to last for as long as the sensor said nothing new.
+
+    It is deliberately not the failsafe, so the control pass skipped, and an
+    element found on at a restart ran on the tank's thermostat alone until the
+    sensor's state next changed. A sensor that is gone never changes.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        upstairs = await loaded_with_no_reading(hass, sensor_state, mode)
+        world["turn_off"].clear()
+
+        frozen.tick(FIRST_READING_WITHIN - timedelta(seconds=1))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"]), "stopped too early"
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+        frozen.tick(timedelta(seconds=2))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert upstairs._temperature_lost
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+        # And it ends the way every lost reading ends: with a reading.
+        hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert not upstairs._temperature_lost
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+def test_the_wait_is_longer_than_a_routine_start_and_short_enough_to_matter():
+    """Its tests use the constant by name, so only this pins its size.
+
+    A real restart leaves the sensor silent for about a minute. Below that the
+    wait would stop a healthy element at every start; at ten minutes it would
+    be the Repairs delay, with an unwatched element drawing all the while.
+    """
+    assert timedelta(minutes=1) < FIRST_READING_WITHIN <= timedelta(minutes=3)
+
+
+async def test_a_first_reading_inside_the_wait_ends_it(hass, world):
+    """The routine case: the sensor's integration loads a moment later."""
+    with freeze_time(TRIGGER) as frozen:
+        upstairs = await loaded_with_no_reading(hass, STATE_UNKNOWN)
+        assert upstairs._first_reading_timer is not None
+        world["turn_off"].clear()
+
+        frozen.tick(timedelta(seconds=60))
+        hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert upstairs._first_reading_timer is None
+
+        frozen.tick(FIRST_READING_WITHIN)
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert not upstairs._temperature_lost
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+async def test_a_heater_that_loads_with_a_reading_starts_no_wait(hass, world):
+    """Guard: an options save reloads with the sensor already there."""
+    await heating_in(hass, STATE_ELECTRIC)
+
+    assert entities(hass)["Upstairs"]._first_reading_timer is None
+
+
+async def test_on_a_home_assistant_start_the_wait_begins_once_it_has_started(hass, world):
+    """A slow start is not the sensor's silence.
+
+    The heater can load minutes before the sensor's integration does. Counting
+    from its own load would stop the element on every slow start.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        hass.set_state(CoreState.starting)
+        upstairs = await loaded_with_no_reading(hass, STATE_UNKNOWN)
+        world["turn_off"].clear()
+
+        frozen.tick(FIRST_READING_WITHIN * 3)
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert not upstairs._temperature_lost
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
+
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+        frozen.tick(FIRST_READING_WITHIN - timedelta(seconds=1))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert not upstairs._temperature_lost
+
+        frozen.tick(timedelta(seconds=2))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert upstairs._temperature_lost
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+
+async def test_unloading_during_the_wait_cancels_it(hass, world):
+    """A timer left armed would call back into a removed entity."""
+    with freeze_time(TRIGGER) as frozen:
+        upstairs = await loaded_with_no_reading(hass, STATE_UNKNOWN)
+        entry = hass.config_entries.async_get_entry(upstairs._entry_id)
+        world["turn_off"].clear()
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert upstairs._first_reading_timer is None
+
+        frozen.tick(FIRST_READING_WITHIN * 2)
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
+
+
+async def test_unloading_before_the_start_finishes_arms_nothing(hass, world):
+    """The wait is registered for the end of the start; a removed heater must not keep it.
+
+    Left registered, the listener armed the timer on an entity that was gone,
+    and two minutes later it switched off a relay it no longer owned.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        hass.set_state(CoreState.starting)
+        upstairs = await loaded_with_no_reading(hass, STATE_UNKNOWN)
+        entry = hass.config_entries.async_get_entry(upstairs._entry_id)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        world["turn_off"].clear()
+
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+        assert upstairs._first_reading_timer is None
+
+        frozen.tick(FIRST_READING_WITHIN * 2)
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
+
+
+async def test_a_sensor_that_speaks_during_the_start_needs_no_wait(hass, world):
+    """Its first word came before the wait could begin, so there is nothing to wait for."""
+    with freeze_time(TRIGGER) as frozen:
+        hass.set_state(CoreState.starting)
+        upstairs = await loaded_with_no_reading(hass, STATE_UNKNOWN)
+        hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        world["turn_off"].clear()
+
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+        assert upstairs._first_reading_timer is None
+
+        frozen.tick(FIRST_READING_WITHIN * 2)
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert not upstairs._temperature_lost
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
+
+
+async def test_performance_does_not_start_heat_before_any_reading(hass, world):
+    """It needs no temperature to decide, so it switched the element on at once.
+
+    With no reading at load that was heat with nothing behind it, and the wait
+    then had to stop it: an element found off went on, then off again.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        hass.states.async_set(UPSTAIRS_SENSOR, STATE_UNKNOWN, {"device_class": "temperature"})
+        mock_restore_cache(hass, (State(UPSTAIRS, STATE_PERFORMANCE, {"temperature": 60}),))
+        await setup_both(hass, stagger_seconds=0.0)
+        upstairs = entities(hass)["Upstairs"]
+        assert upstairs.state == STATE_PERFORMANCE, "test premise"
+
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_on"])
+        frozen.tick(FIRST_READING_WITHIN + timedelta(seconds=1))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert upstairs._temperature_lost
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_on"])
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+        # The first reading is all it was waiting for.
+        hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+async def test_a_reload_during_an_outage_does_not_bring_performance_back(hass, world):
+    """A reloaded heater starts with no memory of the lost reading.
+
+    Performance then switched the element back on, with the sensor still down,
+    until something set the failsafe again: nothing did.
+    """
+    with freeze_time(TRIGGER) as frozen:
+        upstairs = await heating_in(hass, STATE_PERFORMANCE)
+        hass.states.async_set(UPSTAIRS_SENSOR, STATE_UNAVAILABLE)
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF, "test premise"
+        world["turn_on"].clear()
+
+        assert await hass.config_entries.async_reload(upstairs._entry_id)
+        await hass.async_block_till_done()
+        assert entities(hass)["Upstairs"].state == STATE_PERFORMANCE, "test premise"
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_on"])
+
+        frozen.tick(FIRST_READING_WITHIN + timedelta(seconds=1))
+        await after(hass, dt_util.utcnow(), timedelta(0))
+        assert entities(hass)["Upstairs"]._temperature_lost
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_on"])
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF

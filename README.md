@@ -29,7 +29,8 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Failsafe shutdown when the temperature sensor becomes unavailable or unknown, or reports anything
   that is not a number (`nan` and `inf` included), in every heating mode (including `performance`
   and a disinfection cycle) and without waiting for the minimum on duration. The element stays off
-  until the sensor reports a reading again.
+  until the sensor reports a reading again. A heater that loads with no reading waits 2 minutes for
+  the first one (counted from the end of Home Assistant's start, on a start), then does the same.
 - Repairs (Settings > System > Repairs) when the temperature sensor or the heater switch has been
   unavailable for more than 10 minutes, or a disinfection cycle gives up. Each clears itself.
 - **Element Fault** (with a `power_sensor`): a problem sensor that turns on when the meter and the
@@ -351,6 +352,12 @@ In the same window, switch changes are not taken as a person acting on the switc
 reconnecting after a restart can replay states, and one replayed `on` used to start a manual eco
 pause. The control loop puts the switch back where it should be. A config-entry reload while Home
 Assistant is running gets no window, because its sources are already loaded.
+
+The tank sensor gets the same 2 minutes to give its first reading. Until it does, no heat is
+started, in `performance` either, and an element that was already on is left on. If the 2 minutes
+pass with no reading, the failsafe switches the element off; the first reading brings heating back.
+A sensor that takes longer than that to come up after a start therefore costs one off-and-on of
+the relay.
 
 ### Heat now, without leaving the policy off
 

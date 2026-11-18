@@ -21,6 +21,7 @@ from .water_heater_const import (
     OWN_ECHO_WINDOW,
     OUTAGE_REPAIR_AFTER,
     FAILSAFE_WARN_AFTER,
+    FIRST_READING_WITHIN,
     SWITCH_UNAVAILABLE_AFTER,
     ISSUE_TEMPERATURE_SENSOR,
     ISSUE_SWITCH,
@@ -165,6 +166,41 @@ class SwitchControlMixin:
             self._switch_unavailable_timer = None
 
     @callback
+    def _async_begin_first_reading_wait(self, _hass) -> None:
+        """Start the clock on a heater that loaded with no reading."""
+        if (
+            self._current_temperature is not None
+            or self._temperature_lost
+            or self._first_reading_timer is not None
+        ):
+            return
+        self._first_reading_timer = async_call_later(
+            self.hass,
+            FIRST_READING_WITHIN.total_seconds(),
+            self._async_first_reading_overdue,
+        )
+
+    @callback
+    def _end_first_reading_wait(self) -> None:
+        if self._first_reading_timer is not None:
+            self._first_reading_timer()
+            self._first_reading_timer = None
+
+    async def _async_first_reading_overdue(self, _now) -> None:
+        """Still no reading since the heater loaded: by now that is a lost one."""
+        self._first_reading_timer = None
+        # Belt and braces, not covered: any word from the sensor cancels this
+        # timer before it can fire (_async_sensor_changed).
+        if self._current_temperature is not None or self._temperature_lost:
+            return
+        _LOGGER.debug(
+            "%s: no first reading within %d s of loading, treating it as lost",
+            self.name,
+            FIRST_READING_WITHIN.total_seconds(),
+        )
+        await self._async_sensor_changed(STATE_UNKNOWN, dt_util.utcnow(), {})
+
+    @callback
     def _end_failsafe_warning(self) -> None:
         if self._failsafe_warn_timer is not None:
             self._failsafe_warn_timer()
@@ -184,6 +220,9 @@ class SwitchControlMixin:
 
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
+        # The sensor has spoken, with a reading or without one: the wait for
+        # its first word is over either way.
+        self._end_first_reading_wait()
         # Anything that is not a finite number is a missing reading. The
         # tracking helper already delivers such states as unknown; this does
         # not rely on it, because the other answer to a value it cannot use
@@ -770,6 +809,17 @@ class SwitchControlMixin:
 
         # Logic for PERFORMANCE: Heat continuously while not blocked by Smart Eco.
         if self._current_operation == STATE_PERFORMANCE:
+            if self._current_temperature is None:
+                # No reading yet (FIRST_READING_WITHIN). Performance needs no
+                # temperature to decide, but heat started now would be heat
+                # with no reading behind it, stopped again when the wait ends.
+                # An element already on is left alone until the sensor speaks
+                # or the wait is over, like the electric skip below.
+                self._debug_log("decision: PERFORMANCE with no reading yet -> no change")
+                self._debug_log_hvac_action("performance: no reading yet")
+                self._update_smart_eco_state()
+                self.async_write_ha_state()
+                return
             _LOGGER.debug("%s: operation is PERFORMANCE, turning ON", self.name)
             self._debug_log("decision: mode PERFORMANCE -> switch ON")
             await self._async_heater_turn_on()

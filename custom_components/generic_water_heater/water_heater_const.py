@@ -54,6 +54,15 @@ OUTAGE_REPAIR_AFTER = timedelta(minutes=10)
 # unknown, then its reading -- about a minute on a real install -- and that
 # routine gap was a warning on every restart.
 FAILSAFE_WARN_AFTER = timedelta(minutes=2)
+# How long a heater may go without a first reading after it loads (on a Home
+# Assistant start: after the start has finished) before that counts as a lost
+# reading. "No reading yet" is deliberately not the failsafe: setup runs a
+# control pass before the sensor is read, and a sensor whose integration loads
+# later needs a moment (about a minute on a real install). But it stayed "not
+# yet" for ever: an element found on at a restart ran on the tank's own
+# thermostat alone until the sensor's state next changed, and the state of a
+# sensor that is gone never changes.
+FIRST_READING_WITHIN = timedelta(minutes=2)
 # How long the heater switch may be unavailable before the heater itself shows
 # unavailable. The relays here drop off the network for seconds at a time, many
 # times a week (7 days on a real install: 10 drops, none over a minute), and

@@ -126,6 +126,23 @@ retried through the missing-temperature skip and never sent. It is **not** set b
 setup runs a control pass before it reads the sensor, and treating that as the failsafe cycled a
 heating relay off and on at every options save (`test_setup_before_the_first_reading_does_not_cycle_the_relay`).
 
+"Not yet" is bounded, though (4.6.6). A heater that loads with no reading arms
+`_first_reading_timer`; if the sensor has still said nothing after `FIRST_READING_WITHIN` (2 min),
+that is a lost reading like any other. Before, the control pass skipped for as long as the sensor's
+state did not change, so an element found on at a restart ran on the tank's thermostat alone, and a
+sensor that is gone never changes. On a Home Assistant start the wait begins at
+`async_at_started`, not at the heater's own load: the heater can load minutes before the sensor's
+integration, and counting from its load would stop the element on every slow start.
+
+What that costs and what it does not. A sensor that comes up later than 2 minutes after the start
+now cycles an element that was on: off at the end of the wait, on again with the first reading.
+That is the price of the bound; the routine gap is about a minute. During the wait nothing starts
+heat: electric skips for want of a temperature, and `performance` skips too, since heat it started
+then would have no reading behind it and the wait would only have to stop it (a reviewer's repro:
+an element found off went on at load, then off two minutes later). The lost-reading clocks start
+when the wait ends, so a sensor that never speaks stops the element at about 2 minutes, logs the
+warning at about 4 and raises the repair at about 12, counted from the end of the start.
+
 The reading handler has no "ignore" branch. Until 2026-11-18 a value it could not parse made it
 return, and `nan` became the temperature, which no comparison can act on: either way an element
 that was on stayed on. Any new path that hands the heater a reading must end in a finite number or
@@ -561,11 +578,11 @@ the same pattern.
     Converting readings to Celsius where they meet those constants (the tracking helper delivers
     each reading with its unit) is the real fix: roughly 100 to 150 lines, plus a decision on the
     history a Fahrenheit install has already stored.
-  - **A restart with the element on and no reading does not enter the failsafe.** "No reading yet"
-    is deliberately not a lost reading (it cycled the relay at every options save), so the control
-    pass skips, and an element found on stays on until the sensor's state next changes; a sensor
-    that never reports again never changes. A bounded wait (no first reading within some minutes of
-    setup, then the failsafe) would close it.
+  - Fixed in 4.6.6 too: a restart with the element on and no reading now enters the failsafe after
+    `FIRST_READING_WITHIN` (see "No reading, no heat"). Not seen on hardware.
+  - Switching the legionella sensor off in the options while a cycle runs looks unhandled (read,
+    not tested): the select and the sensor go, the heater restores the policy and the cycle, and
+    nothing can complete it before the give-up bound.
   - `believed_on` carried across a reload is not corrected when the switch is found off on the way
     back, whatever `DepartedAnchor`'s docstring says: that heater's next switch-on is admitted
     without a new anchor, so a sibling can follow it sooner than the stagger by the length of the

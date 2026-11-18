@@ -442,6 +442,8 @@ class GenericWaterHeater(
         self._sensor_outage_timer = None
         self._switch_outage_timer = None
         self._failsafe_warn_timer = None
+        # Armed when the heater loads with no reading (FIRST_READING_WITHIN).
+        self._first_reading_timer = None
         self._failsafe_warned = False
         self._switch_unavailable_timer = None
         self._operation_list = [
@@ -1108,6 +1110,13 @@ class GenericWaterHeater(
             startup_reading = finite(temp_sensor.state)
             if startup_reading is not None:
                 self._current_temperature = startup_reading
+        if self._current_temperature is None:
+            # Not the failsafe yet, but not "not yet" for ever either (see
+            # FIRST_READING_WITHIN). On a start the wait begins once Home
+            # Assistant has finished starting; on a reload that is now.
+            self.async_on_remove(
+                async_at_started(self.hass, self._async_begin_first_reading_wait)
+            )
 
         heater_switch = self.hass.states.get(self.heater_entity_id)
         if heater_switch and heater_switch.state not in (
@@ -1206,6 +1215,7 @@ class GenericWaterHeater(
             self._sensor_outage_timer,
             self._switch_outage_timer,
             self._failsafe_warn_timer,
+            self._first_reading_timer,
             self._switch_unavailable_timer,
             self._manual_performance_timer,
         ):
@@ -1215,6 +1225,7 @@ class GenericWaterHeater(
         self._sensor_outage_timer = None
         self._switch_outage_timer = None
         self._failsafe_warn_timer = None
+        self._first_reading_timer = None
         self._switch_unavailable_timer = None
         self._surplus_boost_lockout_timer = None
         self._cooldown_timer = None
