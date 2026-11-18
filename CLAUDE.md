@@ -545,15 +545,22 @@ the same pattern.
     entity so it cannot fall behind again.
 
   Found while fixing them, all older than this change, and open:
-  - **The integration is Celsius-only, and does not say so.** Readings arrive in the unit system's
-    unit and are compared with constants that are in Celsius, unconverted: the disinfection
-    thresholds in `sensor.py`, `DISINFECTION_GOAL_C`, the spike filter's 10, Element Fault's 50 and
-    5, Hot Water In Use's rates, the heat-rate bounds, and the config flow's default range
-    (15 to 80). Reproduced on a US-customary system: an hour at 61 F set
-    `last_disinfection_at` and Disinfection Due In read 10 days, a false "disinfected". Either
-    convert readings to Celsius where they meet those constants (the tracking helper delivers each
-    reading with its unit) or state the limit and refuse the legionella sensor on a non-metric
-    system. Not decided.
+  - **The integration is Celsius-only.** Readings arrive in the unit system's unit and are compared
+    with constants that are in Celsius, unconverted: the disinfection thresholds in `sensor.py`,
+    `DISINFECTION_GOAL_C`, the spike filter's 10, Element Fault's 50 and 5, Hot Water In Use's
+    rates, the heat-rate bounds, and the config flow's default range (15 to 80). Reproduced on a
+    US-customary system before 4.6.6: an hour at 61 F set `last_disinfection_at` and Disinfection
+    Due In read 10 days, a false "disinfected". Since 4.6.6 the README says so, and where
+    `celsius_system(hass)` is false the Legionella Risk sensor is inert (Unknown, nothing restored,
+    no samples) and the heater refuses every policy but Off, drops a restored one and ends a
+    restored cycle: with the sensor inert nothing could complete a cycle, and a one-shot would hold
+    performance until the give-up bound. The unit is read when the entities load, so the entry
+    reloads when the unit system's temperature unit changes (`async_setup_entry`). The heater and
+    the policy select each restore the policy and hand it to the other, in either platform order:
+    every guard on that path is tested in both. The other constants are still unconverted there.
+    Converting readings to Celsius where they meet those constants (the tracking helper delivers
+    each reading with its unit) is the real fix: roughly 100 to 150 lines, plus a decision on the
+    history a Fahrenheit install has already stored.
   - **A restart with the element on and no reading does not enter the failsafe.** "No reading yet"
     is deliberately not a lost reading (it cycled the relay at every options save), so the control
     pass skips, and an element found on stays on until the sensor's state next changes; a sensor

@@ -52,6 +52,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 import homeassistant.util.dt as dt_util
 
 from . import (
+    celsius_system,
     CONF_ENABLE_FORECAST_PREHEAT,
     CONF_FORECAST_ENTITY,
     CONF_FORECAST_MIN_KWH,
@@ -1143,6 +1144,18 @@ class GenericWaterHeater(
                 self._async_handle_legionella_risk,
             )
         )
+
+        if (
+            self._legionella_mode != LEGIONELLA_MODE_OFF
+            and not celsius_system(self.hass)
+        ):
+            # No policy runs here (see celsius_system). One restored from
+            # before that was enforced is dropped, and the reconcile below ends
+            # its cycle: left alone it would hold performance until the
+            # give-up bound, with nothing able to complete it.
+            self._legionella_mode = LEGIONELLA_MODE_OFF
+            self._runtime["legionella_mode"] = LEGIONELLA_MODE_OFF
+            self._notify_legionella_select()
 
         # A restart restores current_operation and re-runs control at the end of
         # this method, so a stale PERFORMANCE would re-arm before anything could

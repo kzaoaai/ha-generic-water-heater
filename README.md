@@ -101,6 +101,21 @@ not a number, which counts as unknown, so the failsafe still turns the element o
 3. Search for `Generic Water Heater` and install it.
 4. Restart Home Assistant.
 
+## Celsius only
+
+This integration works in Celsius. The heater's own control is unit-neutral: the target, the
+tolerances and the readings are all in Home Assistant's temperature unit. Everything that compares
+the tank with a built-in temperature is not converted, so on a Home Assistant set to Fahrenheit:
+
+- The **Legionella Risk** sensor stays `Unknown` and takes no readings, and any disinfection policy
+  other than Off is refused: the select goes back to Off. Its thresholds are in Celsius: before
+  4.6.6 an hour at 61 °F was recorded as a completed disinfection. Changing the unit system takes
+  effect at once, with no restart.
+- **Hot Water In Use**, **Element Fault**'s no-draw check, the sensor glitch filter and the bounds
+  on a learned Heat-up Rate use thresholds sized for Celsius, and are off by the difference.
+- The default temperature range (15 to 80) is a pair of plain numbers: set the minimum and maximum
+  yourself.
+
 ## Configuration
 
 This integration is configured from the Home Assistant UI.
@@ -463,7 +478,8 @@ disagreement can be argued with rather than guessed at.
 
 An optional sensor reporting how favourable this tank's recent temperature history has been to
 Legionella growth, and how long since it last reached a disinfection temperature. Enable it with
-`enable_legionella_sensor`.
+`enable_legionella_sensor`. It works in Celsius only: on a Home Assistant set to Fahrenheit it stays
+`Unknown` and every disinfection policy but Off is refused (see [Celsius only](#celsius-only)).
 
 **Read this before relying on it.** It is a *thermal-conditions index computed from one sensor at
 one height*. It is not a measurement of contamination, and only a laboratory culture or PCR test can

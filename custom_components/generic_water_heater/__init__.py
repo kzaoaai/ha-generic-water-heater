@@ -7,8 +7,13 @@ from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.water_heater import DOMAIN as WATER_HEATER_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
-from homeassistant.core import HomeAssistant
+from homeassistant.const import (
+    EVENT_CORE_CONFIG_UPDATE,
+    MAJOR_VERSION,
+    MINOR_VERSION,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import slugify
 import homeassistant.util.dt as dt_util
@@ -281,6 +286,18 @@ def async_get_fleet(hass: HomeAssistant) -> HeaterFleet:
     return fleet
 
 
+def celsius_system(hass: HomeAssistant) -> bool:
+    """Whether Home Assistant works in Celsius.
+
+    The legionella sensor and the disinfection policy work in Celsius only.
+    Readings arrive in the unit system's unit and are compared, unconverted,
+    with thresholds that are in Celsius (60 C opens a hold). On a Fahrenheit
+    system an hour at 61 F was recorded as a completed disinfection, so there
+    the sensor stays Unknown and no policy runs.
+    """
+    return hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS
+
+
 def eco_condition_configured(config: dict) -> bool:
     """Whether the entry has any eco condition: an entity input or the template.
 
@@ -336,6 +353,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime[CONFIG_SNAPSHOT_KEY] = (dict(entry.data), dict(entry.options))
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
+
+    # The temperature unit is read when the entities load (celsius_system, the
+    # Heat-up Rate's unit), and changing the unit system is not a restart.
+    # Without a reload the legionella sensor went on judging readings that had
+    # turned to Fahrenheit against its Celsius thresholds.
+    celsius = celsius_system(hass)
+
+    @callback
+    def _units_changed(_event) -> None:
+        if celsius_system(hass) != celsius:
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    entry.async_on_unload(
+        hass.bus.async_listen(EVENT_CORE_CONFIG_UPDATE, _units_changed)
+    )
     return True
 
 

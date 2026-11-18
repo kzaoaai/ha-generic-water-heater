@@ -34,6 +34,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 import homeassistant.util.dt as dt_util
 
 from . import (
+    celsius_system,
     CONF_ENABLE_ENERGY_SPLIT,
     CONF_ENABLE_HEAT_UP_RATE,
     CONF_SURPLUS_ENTITY,
@@ -853,6 +854,8 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         # persisted: a restart lands with it cleared, which can at worst forgive
         # one extra dip on a hold that the old code discarded outright.
         self._sustain_breach_at: datetime | None = None
+        # Set when Home Assistant does not work in Celsius (async_added_to_hass).
+        self._celsius_only = False
         self._attr_native_value = STATE_UNKNOWN_RISK
 
         # Spell the name out unless the device can supply one. Without this a
@@ -896,7 +899,10 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
             "max_temperature_7d": peak,
             "samples_tracked": len(self._history),
             "caveat": (
-                "Thermal conditions at one sensor, not a contamination measurement. "
+                "Not available: this sensor works in Celsius only, and this Home "
+                "Assistant uses another temperature unit."
+                if self._celsius_only
+                else "Thermal conditions at one sensor, not a contamination measurement. "
                 "The tank base is colder than this reading and sediment colder still."
             ),
         }
@@ -904,6 +910,21 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
     async def async_added_to_hass(self) -> None:
         """Restore state and subscribe to temperature updates."""
         await super().async_added_to_hass()
+
+        if not celsius_system(self.hass):
+            # Inert: nothing restored, no samples taken, no verdict. What a
+            # Fahrenheit install stored before this was judged against the
+            # wrong thresholds, so none of it is kept. See celsius_system.
+            self._celsius_only = True
+            _LOGGER.warning(
+                "%s works in Celsius only and this Home Assistant uses %s: "
+                "it stays Unknown and no disinfection policy runs",
+                self.name,
+                self.hass.config.units.temperature_unit,
+            )
+            self._publish_risk()
+            self.async_write_ha_state()
+            return
 
         if (stored := await self._async_get_last_data()) is not None:
             self._last_disinfection_at = (
@@ -949,7 +970,9 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         is woken by a dispatcher signal -- the same wiring the Smart Eco select
         already uses in the other direction.
         """
-        progress = round(self._hold_seconds / 60, 1)
+        # None where the sensor is inert: "0.0 minutes banked" would read as a
+        # hold that has not started, not as one that cannot.
+        progress = None if self._celsius_only else round(self._hold_seconds / 60, 1)
         if self._runtime is not None:
             self._runtime["legionella_risk"] = self._attr_native_value
             self._runtime["legionella_hold_progress_minutes"] = progress

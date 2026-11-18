@@ -7,6 +7,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 import homeassistant.util.dt as dt_util
 from . import (
     SMART_ECO_MODE_OFF_UNTIL_TARGET,
+    celsius_system,
     legionella_signal,
     DISINFECTION_GIVE_UP_DAYS,
     LEGIONELLA_BYPASS_ECO_MODES,
@@ -25,7 +26,21 @@ class DisinfectionMixin:
 
     async def async_set_legionella_mode(self, mode: str, source: str) -> None:
         """Set the disinfection policy for this tank."""
-        if mode not in LEGIONELLA_MODES or self._legionella_mode == mode:
+        if mode not in LEGIONELLA_MODES:
+            return
+        if mode != LEGIONELLA_MODE_OFF and not celsius_system(self.hass):
+            # Nothing could complete the cycle: the sensor that judges a hold
+            # is inert here (see celsius_system), so a one-shot would hold the
+            # element on in performance until the give-up bound, days later.
+            _LOGGER.warning(
+                "%s: disinfection works in Celsius only; the policy stays off",
+                self.name,
+            )
+            # The select wrote its choice to runtime before asking.
+            self._runtime["legionella_mode"] = self._legionella_mode
+            self._notify_legionella_select()
+            return
+        if self._legionella_mode == mode:
             return
 
         self._legionella_mode = mode
@@ -240,10 +255,21 @@ class DisinfectionMixin:
         """
         if mode not in LEGIONELLA_MODES:
             return
+        refused = (
+            mode != LEGIONELLA_MODE_OFF
+            and self.hass is not None
+            and not celsius_system(self.hass)
+        )
+        if refused:
+            mode = LEGIONELLA_MODE_OFF
         self._legionella_mode = mode
         self._runtime["legionella_mode"] = mode
         if self.hass is not None:
             self.async_write_ha_state()
+        if refused:
+            # The select may have set up first and be showing what it
+            # restored; nothing else would tell it the policy is not running.
+            self._notify_legionella_select()
 
     @callback
     def _notify_legionella_select(self) -> None:
