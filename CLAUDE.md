@@ -171,6 +171,87 @@ arrived, losing it is the failsafe at once, however soon after the load, and a h
 with a reading never has the allowance at all (a reviewer's mutant survived until
 `test_a_heater_that_loads_with_a_reading_during_a_start_waits_for_nothing`).
 
+### A reading that does not move while the tank is heated is a lost reading (4.6.8)
+
+"No reading, no heat" acts on a sensor that says it has no reading. A sensor that has stopped
+reporting says nothing of the kind: it keeps its last number, the entity stays available, and the
+failsafe has nothing to see. Seen on prod 2026-11-18: a battery Zigbee sensor behind an MQTT bridge
+made its last report at 05:18 UTC, the bridge went on serving that value (and replays it after
+every Home Assistant restart: unavailable, unknown, the same number), and from 10:35 the element
+heated for about 90 minutes on it. Only the eco condition going false stopped it; the bound was
+the tank's thermostat.
+
+Silence cannot be the test: a sensor that reports on change is legitimately silent for 30 minutes
+and more while a tank sits still (the disinfection item under Open items). The test is physical. A
+tank that is being heated moves, so `reading_health.HeatingWatch` (pure, injected `now`) counts
+the time the tank has been heated since its reading last moved, and at `STALE_READING_AFTER`
+(30 min) the heater holds the reading as lost. The pieces, each of which a reviewer or a critic of
+the first draft broke in its simpler form:
+
+- **Heated** (`_heated_now`): there is a reading, the heater switch reads on, and either the tank
+  is in the cold region (`element_health.below_any_cutout`, Element Fault's own: at or below
+  min(target, 50) - 5, Celsius systems only, because the bounds are Celsius and readings are not
+  converted) or the meter reads at least `DRAW_W`. The cold region needs no meter: down there no
+  mechanical thermostat can be open, so a closed relay heats or is broken, and stopping is right
+  for both. **The meter only adds.** The draft let a readable meter decide alone, and then a meter
+  that reads nothing by mistake hid a stale sensor in a cold tank. Above the cold region only the
+  meter can tell heating from a tank at its cutout with the relay closed (37 minutes of silence at
+  64 C, seen), so without one a reading stuck up there is not covered.
+- **Moved** is at least `STALE_READING_BAND` (0.5) from the value the count started on, either
+  way. Not "differs from the reading before": two cached values served in turn differ every time
+  and move nowhere, and one stray report would restart the count or release a hold. Not "rose": a
+  tank drawn from harder than its element heats falls while heated.
+- **The count is banked across pauses and reset only by a move.** A flapping eco condition runs
+  the element three minutes at a time; a count that restarted with each run never ended. A missing
+  reading is not passed to the watch at all: it neither counts nor resets, so a sensor that drops
+  out and returns with the same number has not moved.
+- **The hold** (`_hold_stale_reading`) is the existing failsafe, `_temperature_lost` with
+  `_current_temperature` None, plus `_stale_temperature`, which is what makes it differ: the next
+  number does not end it. It has its own repair (`temperature_sensor_stale`), raised at once, and
+  starts neither the lost-reading warning nor the "sensor unavailable" repair.
+- **It ends two ways only.** A reading that has moved from the stuck value
+  (`_async_sensor_changed`), or a person asking for heat (`_retry_stale_reading`, from
+  `async_set_operation_mode` with a heating mode and from `async_turn_on`, before its Always ON
+  return). The second exists because the hold keeps the element off, and a tank that is not heated
+  and sits at room temperature may not move half a degree for days: the owner who changed the
+  battery, or reset a breaker that made a dead element look like a dead sensor, could not get heat
+  back, and a restart restores the hold. It is another try, not a pardon: the number it was stuck on
+  is taken at its word (not the entity's raw state, which can be a wild value the spike filter is
+  still holding) and the count starts from zero. "Moved" is compared with a 1e-9 allowance in all
+  three places (`reading_health.moved`): 32.3 - 31.8 is not 0.5 in floats. **Nothing restored, timed or carried
+  may call it**: it switches an element on.
+- **Across a restart or a reload** `stale_temperature` is restored from the attributes, but only
+  when the stored copy names the same sensor (`HeaterStoredData.reading_sensor`): what was learned
+  about one sensor is never held against another configured in its place, and with no stored copy
+  it is dropped. The first number decides (`_take_startup_reading`, or `_async_sensor_changed` when
+  the sensor is still coming up): inside the band the hold goes on, with its repair raised again;
+  moved, it is released. While the sensor has not spoken the hold is pending, published, and
+  commands nothing. A count that had not run out is restored the same way (`watch_value`,
+  `watch_heated_s`), from the stored copy only: it moves with the clock, so it is not published.
+  A restored count or hold can stop heat sooner. Neither can start any. All of this is for a
+  clean stop: restore data is saved at a stop and every 15 minutes, so a hard crash forgets a hold
+  that began since the last save and the element heats again for what was left of the saved count
+  (a reviewer's replay; `async_dump_states` at the trip would close it and is not done). When no hold comes through
+  a load (none saved, another sensor, or the reading moved) the repair is cleared there: the issue
+  registry survives a reload, and after the owner configured a new sensor in place of the dead one
+  the repair went on saying the old one was holding the heater off (a reviewer's repro). The
+  stored count is read back as any finite number and bounded inside `HeatingWatch.restore`, which
+  takes seconds for that reason: 1e300 overflowed `timedelta()` and failed the heater's setup.
+
+This is the one place the meter decides anything (see the `power_sensor` section), and all it can
+decide is that heat stops.
+
+What it costs and what it leaves. No meter and a reading stuck above the cold region: runs to the
+thermostat as before. A meter that also measures another load makes a tank at its cutout look
+heated (a false hold; Element Fault reports that wiring as drawing while off). A tank that heats
+slower than the band in the limit, 1 C an hour, is held wrongly. A dead element in a cold tank
+with no meter is reported as a stale sensor (the heat stops either way, and the repair text says
+so). On a Fahrenheit install only the meter judges. The legionella sensor reads the temperature
+sensor itself, so a sensor stuck at or above 60 C can still be credited toward a hold there. A
+wall-switch ON that changes the mode goes through `async_set_operation_mode` and so is asking for
+heat; one pressed ON in `performance` remaps no mode and is not: the
+failsafe switches it off again, as it does for a lost reading.
+
 ### `performance` never reports idle
 
 It holds the element on unconditionally and the appliance's mechanical thermostat is what stops it,
@@ -289,8 +370,9 @@ correctly. That holds for clean stops. A hard crash writes no restore data (it i
 every 15 minutes), so a loop of hard crashes restores the same stale `surplus_active` at every boot
 and keeps an element that stays on until the last boot's grace ends (a reviewer's replay: five
 boots 60 s apart, first off at 520 s); the boost target and the tank's thermostat bound it. A
-surplus entity that reads `on` for an instant and `off` again inside the grace ends the carry and,
-with the element on, starts the short-run lockout, as it would have before. A relay that reads
+surplus entity that reads `on` for an instant and `off` again inside the grace ends the carry. Up
+to 4.6.7 it also started the short-run lockout; since 4.6.8 nothing inside the grace does (the
+lockout now parks normal heating: see the surplus boost section). A relay that reads
 `unknown` when the heater loads (an optimistic or MQTT switch before its first report) is not
 counted as on, so it is sent the OFF and cycles as before 4.6.7; `unavailable` is sent it too and
 Home Assistant drops it. Not commanding a relay that cannot be read during the grace would close
@@ -348,8 +430,12 @@ the hold progress changes. History stored before 4.6.1 (raw samples) is read int
 ### `power_sensor` and `eco_gated` are a contract with another integration
 
 `power_sensor` is the configured meter on the element's circuit (or `None`), published, and
-never read for control. Two read-only diagnostics read it as evidence: Element Fault, and since
-4.6.4 the disinfection hold's element-off check. `eco_gated` is `True` only while the heat depends on the Smart Eco
+never read to start heat or to balance anything. Two read-only diagnostics read it as evidence:
+Element Fault, and since 4.6.4 the disinfection hold's element-off check. Since 4.6.8 one control
+path reads it too, stop-only: `_heated_now` counts a draw as evidence that the tank is being
+heated, for the stale-reading failsafe, and the only thing that can follow is the element being
+held off. It can add a verdict and never remove one (the cold region does not ask it). Do not
+widen that: a meter that could start heat or hold it on would make this a second power balancer. `eco_gated` is `True` only while the heat depends on the Smart Eco
 condition — it would stop if the condition went false (`_eco_gated`: policy enforcing, the
 condition true and the startup grace over, `electric`, no disinfection, not shed). A battery runtime estimate in another integration
 leaves an `eco_gated` heater's metered draw out of what the battery must carry when the
@@ -392,7 +478,50 @@ their draw exceeded late-afternoon PV. Holding the element through that would dr
 there is no hold: a boost whose element was on when surplus left, within `SURPLUS_BOOST_SHORT_RUN`
 (10 min) of it arriving, is locked out for `SURPLUS_BOOST_LOCKOUT` (30 min). The check runs at the
 falling edge, before the new state is read, because a slow relay reports its ON after the control
-pass that commanded it. Normal heating is never locked out.
+pass that commanded it.
+
+**Since 4.6.8 a locked-out surplus does not count for the eco gate either.** Until then "normal
+heating is never locked out" stood here, on the reasoning that below its normal target a tank
+heats on surplus anyway. That is exactly why the lockout did nothing on 2026-11-18: both tanks
+were below their normal target, the lockout fired at every short run and withheld a boost nobody
+was getting, and both relays followed 15 changes of the surplus in 100 minutes (six runs of about
+3 minutes, about a minute apart). The owner's rule, no relay operation without a good reason,
+decided it: a surplus that could not carry the element a minute ago cannot carry it now, whatever
+the tank's temperature. So `_recompute_eco_condition` takes the surplus term as "active and not
+locked", and one lockout with one deadline (`surplus_boost_locked_until`, name kept) serves both.
+The utility and the template terms are untouched.
+
+- **Trigger** (`_surplus_heating_now`): the element reads on with heat that ends when the surplus
+  does. The boost, as before, or normal heating that Smart Eco allows on the surplus alone: not
+  while the utility or the template also allows it (that heat goes on, so the surplus leaving
+  proves nothing). Never while a lockout already runs, or an OFF held back by `min_on_duration`
+  lets the flapping renew the lockout it is sitting out.
+- **A run must be seen to begin to be called short.** `_handle_surplus_edge` takes `seen` (not the
+  first reading after a load, not inside the startup grace) and `left` (the entity is readable and
+  inactive). An unseen rise leaves the window start unknown, and `_boost_heating_since` is stamped
+  only at a relay OFF to ON outside the grace, never at an attribute report, a return from a
+  dropout or a state a relay replays as it reconnects. Before, a reload dated a run of hours as
+  seconds old. **This is the whole of what keeps a restart from setting a lockout**, which used to
+  cost a boost and would now park, when the grace ends, a tank that was heating before the
+  restart: nothing in the grace is seen to begin, so nothing that ends in it or after it is short.
+  The first draft also refused a lockout inside the grace and left grace heat out of the trigger;
+  the mutation run showed both did nothing the two stamps did not already do, and they went. An
+  entity that goes unavailable stops the heat as it always has and sets no lockout.
+- When the lockout ends the condition is recomputed and control runs; a restored lockout is
+  clamped to one lockout's length.
+- The label `Waiting after a short surplus` shows while the gate is closed only by the lockout.
+
+Costs, accepted. After a short run up to 30 minutes of real surplus go unused for that tank, a
+cloud-sized dip included: a surplus that reads active with the element off is what both a passing
+cloud and a too-small surplus look like, so there is no early release. The first short run of each
+30 minutes still happens. A long run followed by a one-minute dip still costs an off and an on.
+With `min_on_duration` above zero a dip shorter than it used to cost nothing and now costs an off
+and, at the end of the lockout, an on. If the surplus falls a moment before the utility arrives,
+the lockout is set and matters when the utility later leaves
+(`test_the_utility_arriving_after_the_surplus_fell_changes_no_verdict`): each entity changes in
+its own event. The restart that installs 4.6.8 inside a lockout set by 4.6.7 parks a tank that was
+heating normally, once. A disinfection cycle that waits for eco is slowed by lockouts like any
+other heat under the gate.
 
 ### Power (mirror) is a copy and must never be counted
 
@@ -563,6 +692,7 @@ options form.
 | `switch.py` | Eco: Use Utility and Boost: Use PV Excess, views onto the water heater |
 | `binary_sensor.py` | Hot Water In Use draw detector; Element Fault |
 | `element_health.py` | Element Fault's decision (meter vs relay); pure logic, no Home Assistant imports |
+| `reading_health.py` | the stale-reading count (heated time since the reading last moved); pure logic |
 | `heat_rate.py` | heat-up rate learning and the Ready At estimate; pure logic |
 | `energy_split.py` | today's element energy per source; pure logic |
 | `insights.py` | the Heat-up Rate, Ready At and Energy Today entities (plumbing for the two above) |
@@ -570,8 +700,8 @@ options form.
 
 `fleet.py` is deliberately Home-Assistant-free and driven by an injected `now`, so its decisions can
 be unit tested without an event loop. Keep new decision logic there and the plumbing in
-the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py` and `element_health.py` follow
-the same pattern.
+the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py`, `element_health.py` and
+`reading_health.py` follow the same pattern.
 
 ---
 
@@ -603,12 +733,52 @@ the same pattern.
   of silence at 64+ C, hold stalled). The meter is credited only for the hold, never for control.
   A tank with no meter still stalls this way. 4.6.4 has been live on prod since the 2026-11-14
   restart; neither path yet seen completing a hold on hardware.
-- 4.6.6 has been live on prod since the restart of 2026-11-18 09:40 UTC, on Home Assistant
-  2026.11.2 (the tests still run on 2026.10.2). Both heaters came back as they were, parked by
-  Smart Eco, with their state, and the log has nothing from the integration. None of its fixes has
-  been seen on hardware yet. What to look for: a surplus boost on a tank with cold tolerance 0
-  stops at exactly the boost target and stays off; Ready At moves at once when the target changes
-  mid-run.
+- 4.6.7 has been live on prod since the restart of 2026-11-18 14:12 UTC, on Home Assistant
+  2026.11.2 (the tests still run on 2026.10.2). Diagnostics carry `awaiting_first_reading` and
+  `boost_surplus_carried`, and the log has nothing from the integration. Neither relay moved,
+  across the restart or when the 3 minutes ended. What that restart did and did not exercise:
+  - One tank was mid disinfection cycle with its element on. It came back in the cycle with
+    `disinfection_started_at` kept, and the relay stayed closed throughout. Its sensor already had
+    a number when the heater loaded, so there was no wait.
+  - The other tank was parked by Smart Eco, element off. Its sensor said `unavailable` 0.3 s after
+    the heater loaded, `unknown` 12 s later, and gave a number 69 s after the load. The heater
+    wrote no state for either word and has no failsafe set. That is the "not yet" path, but
+    inferred: `temperature_lost` is recorded nowhere, and with the element off no relay would have
+    moved in 4.6.6 either. The case the change was written for, those words with the element on,
+    has still not been seen.
+  - The boost carry was not exercised: there was no surplus before or after the restart.
+  - That "first number" was not a reading. The sensor is a battery Zigbee device behind an MQTT
+    bridge, and the bridge replays the device's last cached value when Home Assistant comes back.
+    The device itself had last reported nine hours earlier (next item). So the first-reading wait
+    can be ended by an old value, and so could the 09:40 one below.
+- **4.6.8 is released and has not run on hardware.** Both of its changes came out of what prod
+  showed on 2026-11-18 and neither has been seen there since:
+  - The stale-reading failsafe ("A reading that does not move while the tank is heated is a lost
+    reading"). The incident: one tank's sensor made its last report at 05:18 UTC and its bridge
+    went on serving 28.9 C through two restarts; from 11:00 UTC the element drew about 1.19 kW
+    for 65 minutes in all (metered; the relay was already closed at 11:00) with the reading
+    unchanged, on a sensor that climbs 5-6 C an hour under that element. What to look for: with a
+    sensor that has stopped reporting and the element on, the element stops after 30 minutes of
+    heating, the repair appears, `stale_temperature` holds the number, and a restart keeps it so.
+    Its limits (30 min, 0.5, the cold region's bounds borrowed from Element Fault) are sized to
+    the two tanks of the real install and are guesses for any other.
+  - The lockout for normal heating ("The surplus boost only ever adds heat"). The incident:
+    between 11:15 and 12:56 UTC the surplus sensor changed 15 times and each of the two relays
+    followed every change, 15 operations each in 100 minutes; six of the runs lasted about 3
+    minutes with about 66 s between them. Replayed against 4.6.8 that trace costs each relay 7
+    operations. What to look for on a marginal afternoon: one short run, then
+    `Waiting after a short surplus` with `surplus_boost_locked_until` set, and no relay movement
+    until it passes.
+  - Not built, known: a sensor stuck at or above 60 C can still be credited toward a disinfection
+    hold, because the legionella sensor reads the temperature sensor itself and knows nothing of
+    the heater's hold. A restart makes it worse (the bridge replays the number as a fresh
+    reading, and the element-off gap rule can then credit up to 2 h).
+- 4.6.6 was live on prod from the restart of 2026-11-18 09:40 UTC to the one at 14:12 UTC, on Home
+  Assistant 2026.11.2 (the tests still run on 2026.10.2). Both heaters came back as they were,
+  parked by Smart Eco, with their state, and the log has nothing from the integration. None of its
+  fixes has been seen on hardware yet. What to look for: a surplus boost on a tank with cold
+  tolerance 0 stops at exactly the boost target and stays off; Ready At moves at once when the
+  target changes mid-run.
   That restart never armed the first-reading wait. One tank's sensor entity did not exist when its
   heater loaded, appeared `unavailable` 21 s later (a few seconds before Home Assistant finished
   starting, so before the wait would have been armed), turned `unknown` 45 s after that and gave

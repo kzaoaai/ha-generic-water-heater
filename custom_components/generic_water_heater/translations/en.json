@@ -97,7 +97,7 @@
           },
           "metering": {
             "name": "Metering",
-            "description": "The meter on this heater's circuit, if it has one. Not used for control.",
+            "description": "The meter on this heater's circuit, if it has one. It never starts heat. It is shown to other integrations, and a draw it shows counts as the tank being heated for the stale-reading failsafe, which can only switch the element off.",
             "data": {
               "power_sensor": "Power sensor (optional)"
             },
@@ -253,7 +253,7 @@
           },
           "metering": {
             "name": "Metering",
-            "description": "The meter on this heater's circuit, if it has one. Not used for control.",
+            "description": "The meter on this heater's circuit, if it has one. It never starts heat. It is shown to other integrations, and a draw it shows counts as the tank being heated for the stale-reading failsafe, which can only switch the element off.",
             "data": {
               "power_sensor": "Power sensor (optional)"
             },
@@ -325,6 +325,10 @@
     "temperature_sensor_unavailable": {
       "title": "{name}: temperature sensor unavailable",
       "description": "The temperature sensor {entity_id} has reported no reading for more than ten minutes. While it is down the failsafe keeps the heater switched off, so the tank is not heating. The repair clears itself when a reading arrives."
+    },
+    "temperature_sensor_stale": {
+      "title": "{name}: temperature reading is not moving",
+      "description": "The reading from {entity_id} stayed at {value} through {minutes} minutes of heating. A tank that is being heated moves, so the sensor has most likely stopped reporting: a flat battery, a lost radio link, or a bridge still serving its last value. On a tank with no power meter, an element that is not heating looks the same. The reading is treated as lost and the failsafe keeps the heater switched off. The repair clears itself when the sensor reports a temperature at least half a degree away from {value}. To try again without waiting, choose the heater's operation mode again or turn it on: the sensor is then given another {minutes} minutes of heating to show a change."
     },
     "heater_switch_unavailable": {
       "title": "{name}: heater switch unavailable",

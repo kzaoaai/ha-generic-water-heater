@@ -35,7 +35,12 @@ OWN_ECHO_WINDOW = timedelta(seconds=30)
 # later, the element stops, the pack refills and surplus returns. Seen
 # 2026-10-18 16:16-17:24 as six on/off cycles of 2-3 minutes. So a boost that
 # heated and lost its surplus within SHORT_RUN is not tried again for LOCKOUT.
-# Heating to the normal target is never locked out.
+# Since 4.6.8 the same goes for normal heating that Smart Eco allows on the
+# surplus alone: while the lockout runs the surplus does not count toward the
+# eco condition either. Until then it was "never locked out", and on
+# 2026-11-18 two tanks below their normal target followed 15 changes of the
+# surplus in 100 minutes, relay operation for relay operation. Heat the
+# utility or the template allows is still never locked out.
 SURPLUS_BOOST_SHORT_RUN = timedelta(minutes=10)
 SURPLUS_BOOST_LOCKOUT = timedelta(minutes=30)
 
@@ -72,6 +77,18 @@ FAILSAFE_WARN_AFTER = timedelta(minutes=2)
 # heating relay at a restart. The same length as STARTUP_GRACE, for the same
 # reason.
 FIRST_READING_WITHIN = timedelta(minutes=3)
+# How long a tank may be heated with its reading not moving before the reading
+# is taken as lost (reading_health.py). A sensor that has stopped reporting
+# keeps its last number; on 2026-11-18 an element ran about 90 minutes on one.
+# Counted in heated time only, so a tank that sits still is never judged, and
+# banked across pauses. 30 minutes is six reports of the slowest sensor seen
+# here (0.5 C steps on a tank that climbs 6 C an hour): a tank that heats
+# slower than STALE_READING_BAND in this time (1 C an hour) would trip it.
+STALE_READING_AFTER = timedelta(minutes=30)
+# How far a reading must be from where the count started to have moved, in the
+# heater's own unit. "Any different number" is not enough: two cached values
+# served in turn differ every time and move nowhere.
+STALE_READING_BAND = 0.5
 # How long the heater switch may be unavailable before the heater itself shows
 # unavailable. The relays here drop off the network for seconds at a time, many
 # times a week (7 days on a real install: 10 drops, none over a minute), and
@@ -98,5 +115,6 @@ def _forecast_preheat_config(data: dict) -> dict | None:
         return None
     return {"entity": entity, "min_kwh": min_kwh, "target": target}
 ISSUE_TEMPERATURE_SENSOR = "temperature_sensor_unavailable"
+ISSUE_TEMPERATURE_STALE = "temperature_sensor_stale"
 ISSUE_SWITCH = "heater_switch_unavailable"
 ISSUE_DISINFECTION_GAVE_UP = "disinfection_gave_up"

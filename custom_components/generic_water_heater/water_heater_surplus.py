@@ -169,23 +169,70 @@ class SurplusBoostMixin:
             return self._boost_target_now()
         return self._target_temperature
 
-    def _surplus_boost_heating_now(self) -> bool:
-        """Whether the boost is active and its element is on.
+    def _surplus_heating_now(self) -> bool:
+        """Whether the element is on with heat that ends when the surplus does.
 
-        Deliberately coarse: it does not ask whether the tank was above its
-        normal target. Below it the eco gate heats on surplus anyway, so a
-        lockout changes nothing there. A boost that reached its target and
-        stopped before the surplus left reads False: it did not cause the
-        surplus to leave.
+        That draw is what clears a battery-judged surplus, so it is what a
+        short-run lockout is judged on. Two kinds of heat qualify:
+
+        - the boost, coarsely: active with the element on, without asking
+          whether the tank was above its normal target. A boost that reached
+          its target and stopped before the surplus left reads False: it did
+          not cause the surplus to leave.
+        - normal heating that Smart Eco allows on the surplus alone (4.6.8).
+          Not while the utility (with its switch) or the template also allows
+          it: that heat goes on when the surplus leaves, so the surplus
+          leaving proves nothing about it. A disinfection cycle waiting for
+          eco counts like any other heat under the gate.
+
+        Never while a lockout runs. The gate parks the tank then, but an OFF
+        held back by min_on_duration leaves the element on for a while, and
+        the surplus flapping meanwhile would start the lockout again from
+        each fall: a lockout renewed by the flapping it exists to sit out.
+
+        The startup grace is not asked about here. What keeps a restart from
+        setting a lockout is that nothing in the grace is seen to begin: see
+        _handle_surplus_edge and _note_boost_heating.
         """
-        return self._surplus_boost_active() and self._element_reads_on()
+        if not self._element_reads_on() or self._surplus_boost_locked():
+            return False
+        if self._surplus_boost_active():
+            return True
+        return (
+            self._is_smart_eco_enforcing()
+            # Belt and braces, not covered: both callers ask only while the
+            # surplus reads active (a fall is judged before the new reading,
+            # and the relay's stamp is taken only under an active surplus).
+            and self._surplus_active
+            and not (self._utility_active and self._use_utility())
+            and not self._eco_template_met
+        )
 
-    def _handle_surplus_edge(self, boost_was_heating: bool) -> None:
-        """Open a surplus window, or close one and lock out a short boost."""
+    def _handle_surplus_edge(
+        self, surplus_was_heating: bool, *, seen: bool, left: bool
+    ) -> None:
+        """Open a surplus window, or close one and lock out a short run.
+
+        `seen`: this rise was watched happening. The first reading after a
+        load is not (the surplus may have been there for hours), and neither
+        is one inside the startup grace, where the entity comes up through
+        states that mean nothing (2026-11-15: off for 60 s after a restart).
+        A surplus whose start is not known is not a short one. That, with the
+        relay's side of it in _note_boost_heating, is the whole of what keeps
+        a restart from setting a lockout, which since 4.6.8 would park, when
+        the grace ends, a tank that was heating before it.
+
+        `left`: the surplus entity can be read and says inactive. An entity
+        that dropped out reads inactive too, and stops the heat as it always
+        has, but a sensor blip is not the surplus failing to carry the
+        element.
+        """
         now = dt_util.utcnow()
         if self._surplus_active:
-            self._surplus_window_start = now
-            self._note_boost_heating(now)
+            # The element's own start is stamped where it switches on
+            # (_note_boost_heating). An element already on when the surplus
+            # arrives is measured from the window alone.
+            self._surplus_window_start = now if seen else None
             return
 
         # Measured from the later of surplus arriving and this run of the
@@ -194,12 +241,23 @@ class SurplusBoostMixin:
         # for hours -- and cost one battery-drawing run before the next was
         # (seen 2026-10-18). A run that started before the surplus did is
         # bounded by the surplus window as before.
+        # With the window's start unknown (see `seen`), a run that was seen
+        # starting is still measured, from its own start.
         started = self._surplus_window_start
-        if started is not None and self._boost_heating_since is not None:
-            started = max(started, self._boost_heating_since)
+        if self._boost_heating_since is not None:
+            started = (
+                self._boost_heating_since
+                if started is None
+                else max(started, self._boost_heating_since)
+            )
         self._surplus_window_start = None
         self._boost_heating_since = None
-        if boost_was_heating and started is not None and now - started < SURPLUS_BOOST_SHORT_RUN:
+        if (
+            surplus_was_heating
+            and left
+            and started is not None
+            and now - started < SURPLUS_BOOST_SHORT_RUN
+        ):
             self._surplus_boost_locked_until = now + SURPLUS_BOOST_LOCKOUT
             if self._surplus_boost_lockout_timer is not None:
                 self._surplus_boost_lockout_timer()
@@ -209,25 +267,37 @@ class SurplusBoostMixin:
                 self._async_surplus_boost_lockout_ended,
             )
             self._debug_log(
-                "surplus boost: surplus lasted %ss with the element on; locked out until %s",
+                "surplus lasted %ss with the element on; locked out until %s",
                 int((now - started).total_seconds()),
                 self._surplus_boost_locked_until.isoformat(),
             )
 
     @callback
-    def _note_boost_heating(self, now: datetime) -> None:
-        """Stamp when the element came on under the boost; clear when it stops."""
-        if self._surplus_boost_heating_now():
-            if self._boost_heating_since is None:
+    def _note_boost_heating(self, now: datetime, *, came_on: bool) -> None:
+        """Stamp when the element came on under the surplus; clear when it stops.
+
+        Stamped only where the run is seen to begin (`came_on`): the relay
+        going from off to on, outside the startup grace. The heater switch
+        also reports attribute updates, returns from dropouts and, after a
+        restart, replays states with no command behind them (2026-10-02), and
+        a stamp at one of those dated a run of hours as seconds old, which
+        made its end a "short run".
+        """
+        if self._surplus_heating_now():
+            if self._boost_heating_since is None and came_on:
                 self._boost_heating_since = now
         else:
             self._boost_heating_since = None
 
     async def _async_surplus_boost_lockout_ended(self, _now) -> None:
-        """Let the boost try again."""
+        """Let the surplus count again."""
         self._surplus_boost_lockout_timer = None
         self._surplus_boost_locked_until = None
-        self._debug_log("surplus boost: lockout ended")
+        self._debug_log("surplus lockout ended")
+        # The gate was closed on it (_recompute_eco_condition).
+        self._recompute_eco_condition()
+        self._update_smart_eco_state()
+        # The control pass publishes the state on every one of its paths.
         await self._async_control_heating()
 
     async def async_set_eco_use_utility(self, value: bool) -> None:

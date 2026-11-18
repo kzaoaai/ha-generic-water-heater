@@ -7,7 +7,7 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Thermostat-style control with configurable cold and hot tolerances.
 - Smart Eco policy controlled by a dedicated select entity (Smart Eco Mode). Heating is allowed by named inputs (a surplus entity, a utility entity with its own **Eco: Use Utility** switch) and an optional template.
 - Surplus boost: while surplus is active and **Boost: Use PV Excess** is on, heat toward a higher target, storing spare power as heat without ever heating past the normal target on paid power.
-- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, timed pause states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
+- Smart Eco State sensor that exposes meaningful policy states (Off, Idle, Heating in eco, Blocked by eco condition, Waiting after a short surplus, timed pause states, and override states), including two bypasses that put the policy back by themselves once the tank is satisfied.
 - Optional extra sensor that tracks the highest recorded temperature in the last 7 days, useful for legionella prevention workflows. Its history (and the Legionella Risk sensor's) is kept in 5-minute buckets, so `samples_tracked` counts buckets, not readings.
 - Manual override handling for both water heater entity actions and direct underlying switch toggles.
   A switch returning from `unavailable` is **not** treated as a manual action: it is a device
@@ -33,8 +33,14 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   the first one (counted from the end of Home Assistant's start, on a start), then does the same.
   A sensor that says unavailable or unknown before it has given that first reading is still coming
   up, not lost, so a restart does not switch a heating element off and on while the sensor loads.
+- A reading that stops moving is a lost reading too. A sensor that has stopped reporting keeps its
+  last number and its entity stays available, so the heater would go on heating toward a target on
+  a temperature nobody has taken for hours. Once the tank has been heated for 30 minutes without
+  its reading moving half a degree, the failsafe switches the element off and holds it off until
+  the reading moves or you ask for heat again. See "A reading that does not move".
 - Repairs (Settings > System > Repairs) when the temperature sensor or the heater switch has been
-  unavailable for more than 10 minutes, or a disinfection cycle gives up. Each clears itself.
+  unavailable for more than 10 minutes, when the reading has not moved through 30 minutes of
+  heating, or when a disinfection cycle gives up. Each clears itself.
 - **Element Fault** (with a `power_sensor`): a problem sensor that turns on when the meter and the
   relay disagree -- drawing power while switched off (3 min), or switched on with the tank well
   below any thermostat cutout but drawing nothing (10 min). Read-only: it never switches anything.
@@ -160,7 +166,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
-| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. A boost kept through a Home Assistant start (see "After a Home Assistant restart") reads `false` until the surplus entity is active again: it does not stop when the surplus leaves. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). It never starts heat and never balances anything; its one use in control is stop-only, as evidence that the tank is being heated for the stale-reading failsafe ("A reading that does not move"). Otherwise it is published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. A boost kept through a Home Assistant start (see "After a Home Assistant restart") reads `false` until the surplus entity is active again: it does not stop when the surplus leaves. |
 | `enable_element_fault` | boolean | `true` | The Element Fault sensor. Needs `power_sensor`. |
 | `enable_heat_up_rate` | boolean | `true` | The Heat-up Rate and Ready At sensors. |
 | `enable_energy_split` | boolean | `true` | The three Energy Today sensors. Needs `power_sensor`. |
@@ -313,12 +319,28 @@ the peak. The cold tolerance still decides when it starts again. The boost targe
 - Off stays off, `performance` is unchanged, a load shed outranks the boost, and a disinfection
   cycle runs its own course.
 - A boost target at or below the normal target does nothing.
-- **Short-boost lockout.** A surplus detector that judges surplus from the battery sees the
+- **Short-run lockout.** A surplus detector that judges surplus from the battery sees the
   heater's own draw: when the element needs more than the spare power, the battery discharges,
   surplus clears a few minutes later, the element stops, the battery refills and surplus returns.
-  So when surplus leaves within 10 minutes of arriving while the boost had the element on, the
-  boost is not tried again for 30 minutes (`surplus_boost_locked_until`). Heating to the normal
-  target is never locked out.
+  Left alone, the relay follows every one of those changes. So when surplus leaves within 10
+  minutes of the element starting on it, that surplus does not count again for 30 minutes
+  (`surplus_boost_locked_until`): not for the boost, and since 4.6.8 not for normal heating that
+  Smart Eco allows on the surplus either. The tank stays parked, Smart Eco State reads
+  `Waiting after a short surplus` once the surplus is back, and when the 30 minutes end a surplus that is still there is
+  used again. Details:
+  - Only heat that hangs on the surplus is locked out. If the utility (with **Eco: Use Utility**
+    on) or the template also allows heating, it goes on and no lockout starts; and a lockout
+    never withholds heat the utility or the template allows.
+  - Before 4.6.8 the lockout withheld only the boost, and a tank below its normal target followed
+    a flapping surplus with one relay operation per change. The cost of the change: after a short
+    run, up to 30 minutes of real surplus are not used for that tank. The first short run of each
+    30 minutes still happens.
+  - A surplus entity that goes `unavailable` or `unknown` stops the heat as before but starts no
+    lockout, and nothing starts one in the 3 minutes after a restart or from the first reading
+    after a reload: a surplus whose start was not seen is not a short one.
+  - With a `min_on_duration` above zero, a dip of the surplus shorter than it used to cost no
+    relay operation at all; inside a lockout it now costs an off (when the minimum on time ends)
+    and an on (when the lockout ends).
 
 ### Optional template
 
@@ -393,6 +415,51 @@ middle of a heating run then switched the element off and, about a minute later,
 heating back. A sensor that takes longer than that to come up after a start therefore costs one
 off-and-on of the relay. Once the sensor has given a reading, losing it is the failsafe at once,
 as always.
+
+### A reading that does not move
+
+"No reading, no heat" covers a sensor that says it has no reading. It does not cover one that
+goes on showing its last number: a battery sensor that has died, a radio link that is gone, a
+bridge that keeps serving what it has cached (and serves it again after every restart). The entity
+is available and its state is a number, so the heater compares a target with a temperature nobody
+has taken for hours, and an element can run to the tank's own thermostat on it.
+
+A tank that is being heated moves. So the heater counts the time the tank has been **heated** since
+its reading last **moved**, and at 30 minutes it treats the reading as lost:
+
+- **Heated** means the heater switch is on and one of two things says the element is really
+  heating. Either the tank is cold, at or below 5 °C under its target or 45 °C, whichever is lower:
+  down there no thermostat can have opened the circuit, so a closed relay heats (Celsius installs
+  only). Or the `power_sensor` shows at least 100 W. Without a meter a reading stuck above the cold
+  region is not caught: with the relay closed a tank at its thermostat's cutout sits still too, and
+  the two cannot be told apart.
+- **Moved** means at least 0.5 degrees from the value the count started on, up or down. A stray
+  report a few hundredths off is not a move.
+- The count is kept across pauses, so an element that runs a few minutes at a time is counted too,
+  and across a restart, if the first reading afterwards has not moved. Time the tank is not being
+  heated is never counted: a satisfied tank that sits still for hours is not judged.
+
+When the count runs out the element is switched off, `current_temperature` reads unknown,
+`stale_temperature` holds the number the sensor was stuck on, and a repair is raised. This ends in
+one of two ways:
+
+- the sensor reports a temperature at least 0.5 degrees away from that number, or
+- you ask for heat: choose the operation mode again (`electric` or `performance`) or turn the
+  heater on. The sensor's present number is then taken at its word again and the count starts from
+  zero, so a sensor that is still dead stops the element again after another 30 minutes of heating.
+
+A restart or a reload does not end it, and never switches the element on because of it: the number
+is restored, and if the sensor still shows it the hold continues. That is for a clean stop. Home
+Assistant saves restore data at a stop and every 15 minutes, so after a hard crash a hold that
+began since the last save is forgotten, and the sensor gets the rest of its 30 minutes again. Configuring a different sensor
+entity starts clean.
+
+What it cannot do: the repair says "the sensor has most likely stopped reporting", and on a tank
+with no meter a dead element in a cold tank looks the same (the heat stops either way). A meter
+that also measures another load can make a tank at its thermostat look heated. A tank that heats
+by less than half a degree in 30 minutes of element time (1 °C an hour) would be stopped wrongly.
+And the legionella sensor reads the temperature sensor by itself: this does not stop a sensor
+stuck at or above 60 °C from being credited there.
 
 ### Heat now, without leaving the policy off
 

@@ -1,7 +1,7 @@
 """Element health: does the meter agree with the relay?
 
 Read-only. The meter (`power_sensor`) is published for other integrations and
-never used for control (see CLAUDE.md); this only reports when what the relay
+never used to start heat (see CLAUDE.md); this only reports when what the relay
 was told and what the circuit draws disagree:
 
 - drawing while off: the relay is off but the circuit draws power. A welded
@@ -58,9 +58,20 @@ def element_fault(
         return FAULT_DRAWING_WHILE_OFF if power_w >= DRAW_W else None
     if power_w >= NO_DRAW_W or temperature is None or target is None:
         return None
-    if temperature <= min(target, NO_CUTOUT_BELOW_C) - COLD_MARGIN_C:
+    if below_any_cutout(temperature, target):
         return FAULT_NO_DRAW_WHILE_ON
     return None
+
+
+def below_any_cutout(temperature: float, target: float) -> bool:
+    """Whether the tank is too cold for a mechanical thermostat to be open.
+
+    Down here a closed relay means the element is heating, or should be. Both
+    Element Fault ("no draw while on") and the stale-reading watch
+    (reading_health.py, through the heater) rest on it. In Celsius: the caller
+    answers for the unit.
+    """
+    return temperature <= min(target, NO_CUTOUT_BELOW_C) - COLD_MARGIN_C
 
 
 # Home Assistant's own power units (UnitOfPower), spelled exactly, plus the

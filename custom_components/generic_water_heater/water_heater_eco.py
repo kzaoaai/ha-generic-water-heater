@@ -181,11 +181,13 @@ class SmartEcoMixin:
 
     def _refresh_eco_entities(self) -> None:
         """Read the surplus and utility entities, noting surplus edges."""
-        # Asked BEFORE the new reading, while the boost is still active: is
-        # its element drawing at the moment the surplus leaves? That draw is
-        # what clears a battery-judged surplus. Read here rather than when
-        # control commanded it, because a slow relay reports its ON later.
-        boost_was_heating = self._surplus_boost_heating_now()
+        first_read = not self._eco_entities_read
+        self._eco_entities_read = True
+        # Asked BEFORE the new surplus reading, while it still counts: is the
+        # element drawing on it at the moment it leaves? That draw is what
+        # clears a battery-judged surplus. Read here rather than when control
+        # commanded it, because a slow relay reports its ON later.
+        surplus_was_heating = self._surplus_heating_now()
         was_surplus = self._surplus_active
         self._surplus_active = self._entity_active(self._surplus_entity, self._surplus_state)
         if self._surplus_active:
@@ -193,13 +195,26 @@ class SmartEcoMixin:
             self._carried_surplus = False
         self._utility_active = self._entity_active(self._utility_entity, self._utility_state)
         if self._surplus_active != was_surplus:
-            self._handle_surplus_edge(boost_was_heating)
+            surplus = self.hass.states.get(self._surplus_entity)
+            self._handle_surplus_edge(
+                surplus_was_heating,
+                seen=not first_read and not self._startup_grace_active,
+                left=surplus is not None
+                and surplus.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN),
+            )
 
     def _recompute_eco_condition(self) -> None:
         """Combine the terms: surplus, OR utility while it is used, OR template."""
         previous = self._eco_condition_met
         self._eco_condition_met = (
-            self._surplus_active
+            # A surplus that was lost within SURPLUS_BOOST_SHORT_RUN of the
+            # element starting on it does not count again until the lockout
+            # ends (4.6.8). Before, the lockout withheld only the boost, and a
+            # tank below its normal target followed every flap of a surplus
+            # that could not carry it: 15 relay operations in 100 minutes on
+            # 2026-11-18. The utility and the template are untouched: heat
+            # that does not hang on the surplus is never locked out.
+            (self._surplus_active and not self._surplus_boost_locked())
             or (self._utility_active and self._use_utility())
             or self._eco_template_met
         )
@@ -358,6 +373,15 @@ class SmartEcoMixin:
             state = "Paused until the tank is satisfied"
         elif self._is_smart_eco_enforcing() and self._startup_grace_active and not self._eco_condition_met:
             state = "Starting up"
+        elif (
+            self._is_smart_eco_enforcing()
+            and not self._eco_condition_met
+            and self._surplus_active
+            and self._surplus_boost_locked()
+        ):
+            # The surplus reads active and the tank is parked all the same:
+            # say why. When it ends is surplus_boost_locked_until.
+            state = "Waiting after a short surplus"
         elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
             state = "Blocked by eco condition"
         elif self._eco_condition_met and self._smart_eco_logical_heating_active():

@@ -112,6 +112,7 @@ from .switch import (
     RUNTIME_BOOST_ENABLED,
     RUNTIME_USE_UTILITY,
 )
+from .reading_health import HeatingWatch, moved
 from .temperature_filter import finite
 from .temperature_tracking import async_track_filtered_temperature
 from .water_heater_const import (  # noqa: F401  (re-exported for tests)
@@ -122,10 +123,14 @@ from .water_heater_const import (  # noqa: F401  (re-exported for tests)
     DISINFECTION_BYPASS_HOURS,
     OUTAGE_REPAIR_AFTER,
     FAILSAFE_WARN_AFTER,
+    FIRST_READING_WITHIN,
+    STALE_READING_AFTER,
+    STALE_READING_BAND,
     SWITCH_UNAVAILABLE_AFTER,
     DISINFECTION_GOAL_C,
     _forecast_preheat_config,
     ISSUE_TEMPERATURE_SENSOR,
+    ISSUE_TEMPERATURE_STALE,
     ISSUE_SWITCH,
     ISSUE_DISINFECTION_GAVE_UP,
 )
@@ -314,12 +319,24 @@ class HeaterStoredData(ExtraStoredData):
     state: str | None
     attributes: dict[str, Any]
     off_until_target_for_disinfection: bool = False
+    # The stale-reading watch (reading_health.py): which sensor it was
+    # watching, the value its count is measured from and the heated seconds
+    # counted. Not published: the count moves with the clock, and anything
+    # that changes only because the clock moved stays out of the state. The
+    # sensor is here so that what was learned about one sensor is never held
+    # against another one configured in its place.
+    reading_sensor: str | None = None
+    watch_value: float | None = None
+    watch_heated_s: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "attributes": self.attributes,
             "off_until_target_for_disinfection": self.off_until_target_for_disinfection,
+            "reading_sensor": self.reading_sensor,
+            "watch_value": self.watch_value,
+            "watch_heated_s": self.watch_heated_s,
         }
 
     @classmethod
@@ -328,11 +345,22 @@ class HeaterStoredData(ExtraStoredData):
         attributes = data.get("attributes")
         if not isinstance(state, str) or not isinstance(attributes, dict):
             return None
+        reading_sensor = data.get("reading_sensor")
         return cls(
             state,
             attributes,
             data.get("off_until_target_for_disinfection") is True,
+            reading_sensor if isinstance(reading_sensor, str) else None,
+            _number(data.get("watch_value")),
+            _number(data.get("watch_heated_s")) or 0.0,
         )
+
+
+def _number(value: Any) -> float | None:
+    """A stored value as a finite number, or None. A bool is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return finite(value)
 
 
 class GenericWaterHeater(
@@ -377,7 +405,7 @@ class GenericWaterHeater(
     ):
         """Initialize the water_heater device."""
         self.hass = hass
-        # Published, never read for control (CONF_POWER_SENSOR).
+        # Published. Read for control in one place, stop-only (_heated_now).
         self._power_sensor = power_sensor
         self._attr_name = name
         self.heater_entity_id = heater_entity_id
@@ -413,6 +441,9 @@ class GenericWaterHeater(
         self._forecast_preheat = forecast_preheat
         # When the current surplus window opened, for the short-boost lockout.
         self._surplus_window_start: datetime | None = None
+        # Whether the eco entities have been read since this heater loaded.
+        # The first reading is not an edge: see _handle_surplus_edge.
+        self._eco_entities_read = False
         # When the element last came on while the boost was active (None while
         # it is not). The short-run check measures from here, not only from
         # surplus arriving: see _handle_surplus_edge.
@@ -455,6 +486,16 @@ class GenericWaterHeater(
         # (_async_sensor_changed). False on a bare object, so that nothing but
         # async_added_to_hass, which also bounds it, can open the allowance.
         self._awaiting_first_reading = False
+        # A reading that has stopped moving (reading_health.py). The watch
+        # counts heated time since the reading last moved; _heated is the
+        # last answer it was given. _stale_temperature is the number the
+        # sensor was stuck on when the count ran out, and while it is set the
+        # failsafe holds until the reading moves from it or a person asks for
+        # heat. Published and restored, so a restart does not end the hold.
+        self._heating_watch = HeatingWatch(STALE_READING_AFTER, STALE_READING_BAND)
+        self._heated = False
+        self._stale_temperature: float | None = None
+        self._stale_reading_timer = None
         self._failsafe_warned = False
         self._switch_unavailable_timer = None
         self._operation_list = [
@@ -539,10 +580,14 @@ class GenericWaterHeater(
         """The internal state, for a restore whose published state is unusable."""
         attributes = dict(self.extra_state_attributes)
         attributes[ATTR_TEMPERATURE] = self._target_temperature
+        now = dt_util.utcnow()
         return HeaterStoredData(
             self._current_operation,
             attributes,
             self._off_until_target_for_disinfection,
+            self.sensor_entity_id,
+            self._heating_watch.baseline,
+            self._heating_watch.heated_for(now).total_seconds(),
         )
 
     @callback
@@ -625,6 +670,12 @@ class GenericWaterHeater(
                 if self._surplus_boost_locked()
                 else None
             ),
+            # The number the tank sensor was stuck on when its reading was
+            # found stale (heated for STALE_READING_AFTER without moving), or
+            # None. While it is set the failsafe holds the element off and
+            # current_temperature reads unknown. Restored, so a restart does
+            # not end the hold.
+            "stale_temperature": self._stale_temperature,
         }
 
     @property
@@ -743,8 +794,11 @@ class GenericWaterHeater(
         if operation_mode is not None and operation_mode != self._current_operation:
             # Its control pass sees the target stored above.
             await self.async_set_operation_mode(operation_mode)
-            return
-        await self._async_control_heating()
+        else:
+            await self._async_control_heating()
+        # The target bounds the region where a closed relay alone counts as
+        # heating (_heated_now), and no event follows a new target.
+        self._refresh_heating_watch()
 
     async def async_set_operation_mode(self, operation_mode, *, eco_already_paused=False):
         """Set new operation mode.
@@ -778,6 +832,11 @@ class GenericWaterHeater(
         # Any mode a person sets replaces a wall-switch performance run and its
         # bound; the promotion itself re-arms the bound after this call.
         self._clear_manual_performance_bound()
+
+        if operation_mode in (STATE_ELECTRIC, STATE_PERFORMANCE):
+            # The one way out of a stale-reading hold besides the reading
+            # moving: a person asking for heat (see _retry_stale_reading).
+            self._retry_stale_reading("operation mode")
 
         # A person changing the mode mid-cycle takes the tank back. Ending the
         # cycle here rather than only in the select is what stops two things:
@@ -828,9 +887,14 @@ class GenericWaterHeater(
         if old_mode != operation_mode:
             self._debug_log("operation mode changed: %s -> %s", old_mode, operation_mode)
         await self._async_control_heating()
+        self._refresh_heating_watch()
 
     async def async_turn_on(self, **kwargs):
         """Turn the entity on."""
+        # Asking for heat, whatever the policy then does with the request:
+        # under Always ON it is otherwise ignored, and a person told by the
+        # stale-reading repair to "turn it on" would get nothing.
+        self._retry_stale_reading("turn on")
         if self._smart_eco_mode == SMART_ECO_MODE_ALWAYS_ON and self._has_eco_condition():
             self._debug_log("ignoring manual turn_on while Smart Eco mode is Always ON")
             await self._async_control_heating()
@@ -909,6 +973,14 @@ class GenericWaterHeater(
                 self.hass, [self.heater_entity_id], self._async_switch_changed
             )
         )
+        if self._power_sensor is not None:
+            # Its own subscription, never the switch's: a meter report is not
+            # a switch event. Evidence for the stale-reading watch only.
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._power_sensor], self._async_meter_changed
+                )
+            )
 
         if self.hass.state is not CoreState.running:
             # Only a Home Assistant start. A config-entry reload happens with
@@ -1082,12 +1154,40 @@ class GenericWaterHeater(
                 else None
             )
             if locked_until is not None and locked_until > dt_util.utcnow():
+                # No lockout is longer than SURPLUS_BOOST_LOCKOUT. A stamp
+                # further out than that (a clock that jumped, a hand-edited
+                # state) used to cost a boost; since 4.6.8 it would park
+                # normal heating for as long as it said.
+                locked_until = min(
+                    locked_until, dt_util.utcnow() + SURPLUS_BOOST_LOCKOUT
+                )
                 self._surplus_boost_locked_until = locked_until
                 self._surplus_boost_lockout_timer = async_call_later(
                     self.hass,
                     (locked_until - dt_util.utcnow()).total_seconds(),
                     self._async_surplus_boost_lockout_ended,
                 )
+
+            # A reading found stale stays stale across a restart: the bridge
+            # that served the old number serves it again when Home Assistant
+            # comes back (2026-11-18: twice that day), and without this every
+            # restart bought the sensor another STALE_READING_AFTER of heat.
+            # Only for the sensor it was learned about, which the stored copy
+            # names; with no stored copy it cannot be checked and is dropped.
+            # What is restored here only holds an element off. Whether it
+            # still applies is decided by the first number (the startup read
+            # below, or _async_sensor_changed).
+            same_sensor = (
+                stored is not None and stored.reading_sensor == self.sensor_entity_id
+            )
+            restored_stale = _number(old_state.attributes.get("stale_temperature"))
+            if restored_stale is not None and same_sensor:
+                self._stale_temperature = restored_stale
+            if same_sensor and stored.watch_value is not None:
+                # The count as it stood: it goes on if the first number has
+                # not moved from where it was measured. (Under a hold it has
+                # run out already and changes nothing.)
+                self._heating_watch.restore(stored.watch_value, stored.watch_heated_s)
 
             # What the boost's inputs said when the heater went down. They
             # count only inside the startup grace (_surplus_for_boost), which
@@ -1150,11 +1250,25 @@ class GenericWaterHeater(
             # "nan", which no comparison can act on.
             startup_reading = finite(temp_sensor.state)
             if startup_reading is not None:
-                self._current_temperature = startup_reading
-        if self._current_temperature is None:
+                self._take_startup_reading(startup_reading)
+        if self._stale_temperature is None:
+            # No hold came through the load: none was saved, it was learned
+            # about another sensor, or the reading has moved. A repair can
+            # outlive that (the issue registry survives a reload), and after
+            # the owner configured a new sensor in place of the dead one it
+            # went on saying the old one was holding the heater off. A hold
+            # that did come through has raised its repair again already, or
+            # will at the first number.
+            self._clear_issue(ISSUE_TEMPERATURE_STALE)
+        if self._current_temperature is None and not self._temperature_lost:
             # Not the failsafe yet, but not "not yet" for ever either (see
             # FIRST_READING_WITHIN). On a start the wait begins once Home
             # Assistant has finished starting; on a reload that is now.
+            # A stale-reading hold restored from before the restart waits the
+            # same way while the sensor has not spoken: its first number is
+            # judged against the restored one (_async_sensor_changed). One
+            # that the startup read confirmed is the failsafe already, and
+            # waits for nothing.
             self.async_on_remove(
                 async_at_started(self.hass, self._async_begin_first_reading_wait)
             )
@@ -1243,7 +1357,23 @@ class GenericWaterHeater(
         # a command the entity never meant to issue.
         await self._async_evaluate_disinfection()
         await self._async_control_heating()
+        # An element found on is being heated from now, as far as the watch
+        # can know (a count from before the restart was restored above).
+        self._refresh_heating_watch()
         self.async_write_ha_state()
+
+    @callback
+    def _take_startup_reading(self, reading: float) -> None:
+        """The sensor's number as found when the heater loads."""
+        if self._stale_temperature is not None:
+            if not moved(reading, self._stale_temperature, STALE_READING_BAND):
+                # Still the number it was stuck on: the hold goes on, with its
+                # repair (repairs do not survive a restart by themselves).
+                self._hold_stale_reading(self._stale_temperature)
+                return
+            self._release_stale_reading(f"it moved to {reading:g} over a restart")
+        self._current_temperature = reading
+        self._heating_watch.reading(dt_util.utcnow(), reading)
 
     async def async_will_remove_from_hass(self) -> None:
         """Cancel pending timers so nothing fires after the entity is gone.
@@ -1261,9 +1391,11 @@ class GenericWaterHeater(
             self._first_reading_timer,
             self._switch_unavailable_timer,
             self._manual_performance_timer,
+            self._stale_reading_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
+        self._stale_reading_timer = None
         self._manual_performance_timer = None
         self._sensor_outage_timer = None
         self._switch_outage_timer = None

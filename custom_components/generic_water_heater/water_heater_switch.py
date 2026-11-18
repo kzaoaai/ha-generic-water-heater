@@ -15,15 +15,20 @@ from homeassistant.core import DOMAIN as HA_DOMAIN, callback
 from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
 from homeassistant.helpers import issue_registry as ir
 import homeassistant.util.dt as dt_util
-from . import DOMAIN, SMART_ECO_MODE_OFF_UNTIL_TARGET
+from . import DOMAIN, SMART_ECO_MODE_OFF_UNTIL_TARGET, celsius_system
+from .element_health import DRAW_W, below_any_cutout, to_watts
+from .reading_health import moved
 from .temperature_filter import finite
 from .water_heater_const import (
     OWN_ECHO_WINDOW,
     OUTAGE_REPAIR_AFTER,
     FAILSAFE_WARN_AFTER,
     FIRST_READING_WITHIN,
+    STALE_READING_AFTER,
+    STALE_READING_BAND,
     SWITCH_UNAVAILABLE_AFTER,
     ISSUE_TEMPERATURE_SENSOR,
+    ISSUE_TEMPERATURE_STALE,
     ISSUE_SWITCH,
     _LOGGER,
 )
@@ -218,6 +223,195 @@ class SwitchControlMixin:
                 ISSUE_TEMPERATURE_SENSOR if what == "sensor" else ISSUE_SWITCH
             )
 
+    # --- a reading that has stopped moving (reading_health.py) ---------------
+
+    def _meter_watts(self) -> float | None:
+        """The configured meter in watts; None with no meter or no reading."""
+        if self._power_sensor is None:
+            return None
+        state = self.hass.states.get(self._power_sensor)
+        value = finite(state.state) if state is not None else None
+        if value is None:
+            return None
+        return to_watts(value, state.attributes.get("unit_of_measurement"))
+
+    def _heated_now(self) -> bool:
+        """Whether the tank is being heated, as far as this heater can tell.
+
+        The relay reads on, and one of two things says the element is really
+        heating. Either the tank is too cold for a mechanical thermostat to be
+        open (Element Fault's own region, Celsius only: the constants are in
+        Celsius and the reading is not converted), or the meter shows the
+        draw. The cold region comes first and needs no meter: down there a
+        closed relay heats or is broken, and stopping is right for both. The
+        meter only ever adds: it reaches the readings above that region, where
+        a tank at its thermostat's cutout sits still with the relay closed
+        (seen: 37 minutes at 64 C), and it cannot take the cold region's
+        answer away, so a meter that reads nothing by mistake hides nothing.
+
+        This is the one place the meter decides anything, and all it can
+        decide is that heat stops. See CLAUDE.md, "power_sensor and eco_gated
+        are a contract".
+        """
+        if self._current_temperature is None or not self._element_reads_on():
+            return False
+        if (
+            self._target_temperature is not None
+            and celsius_system(self.hass)
+            and below_any_cutout(self._current_temperature, self._target_temperature)
+        ):
+            return True
+        watts = self._meter_watts()
+        return watts is not None and watts >= DRAW_W
+
+    @callback
+    def _refresh_heating_watch(self, restarted: bool = False) -> None:
+        """Tell the watch whether the tank is being heated, and time its limit.
+
+        Called wherever an input of _heated_now can change: a reading, the
+        heater switch, the meter, the target. It does nothing unless the
+        answer changed (a meter reports every few seconds), or the count
+        itself was started again (`restarted`).
+        """
+        if self.hass is None:
+            return
+        heated = self._heated_now()
+        if heated == self._heated and not restarted:
+            return
+        self._heated = heated
+        now = dt_util.utcnow()
+        self._heating_watch.heating(now, heated)
+        if self._stale_reading_timer is not None:
+            self._stale_reading_timer()
+            self._stale_reading_timer = None
+        due = self._heating_watch.due_in(now)
+        if due is not None:
+            self._stale_reading_timer = async_call_later(
+                self.hass, due.total_seconds(), self._async_reading_overdue
+            )
+
+    @callback
+    def _async_meter_changed(self, _event) -> None:
+        """The meter reported. Evidence for the watch only: no control pass."""
+        self._refresh_heating_watch()
+
+    async def _async_reading_overdue(self, _now) -> None:
+        """Heated for STALE_READING_AFTER and the reading has not moved."""
+        self._stale_reading_timer = None
+        now = dt_util.utcnow()
+        # Not run out after all: time it again. One of two guards for a
+        # reading that moved, and each alone is enough (see CLAUDE.md, "Record
+        # coverage honestly"): _async_sensor_changed re-times the limit when a
+        # reading moves, so the timer that fires is normally the right one,
+        # and if it did not, this would. Removing either passes the suite;
+        # removing both fails test_a_reading_that_moves_is_a_live_sensor.
+        # The "no reading" half is not covered: a reading lost a moment ago
+        # stops the count at the end of its own handler, after the control
+        # pass it awaits, and a timer firing inside that await must not turn
+        # an ordinary lost reading into a hold that only a move can end.
+        if not self._heating_watch.overdue(now) or self._current_temperature is None:
+            self._refresh_heating_watch(restarted=True)
+            return
+        stuck = self._heating_watch.baseline
+        _LOGGER.warning(
+            "%s: the reading from %s has stayed at %s through %d minutes of "
+            "heating; treating it as lost and holding heater %s off",
+            self.name,
+            self.sensor_entity_id,
+            stuck,
+            STALE_READING_AFTER.total_seconds() // 60,
+            self.heater_entity_id,
+        )
+        self._hold_stale_reading(stuck)
+        await self._async_control_heating()
+        self.async_write_ha_state()
+
+    @callback
+    def _hold_stale_reading(self, value: float) -> None:
+        """Hold the failsafe on a reading that has stopped moving.
+
+        The same failsafe as a lost reading (_temperature_lost, enforced in
+        the control pass), with one difference: the next number does not end
+        it, only a number that has moved from `value` does
+        (_async_sensor_changed), or a person asking for heat
+        (_retry_stale_reading). Safe to call again: a restart that finds the
+        sensor still on the same number comes through here too.
+
+        The lost-reading warning and the "sensor unavailable" repair are not
+        started: the sensor is not unavailable, and this has its own repair,
+        raised at once because the count that leads here was the wait.
+        """
+        self._stale_temperature = value
+        self._current_temperature = None
+        self._temperature_lost = True
+        if self._stale_reading_timer is not None:
+            self._stale_reading_timer()
+            self._stale_reading_timer = None
+        self._raise_issue(
+            ISSUE_TEMPERATURE_STALE,
+            entity_id=str(self.sensor_entity_id),
+            value=f"{value:g}",
+            minutes=str(int(STALE_READING_AFTER.total_seconds() // 60)),
+        )
+
+    @callback
+    def _release_stale_reading(self, why: str) -> None:
+        """Stop holding the reading as stale. The caller supplies the reading."""
+        if self._stale_temperature is None:
+            return
+        _LOGGER.info(
+            "%s: the reading from %s is no longer held as stale (%s)",
+            self.name,
+            self.sensor_entity_id,
+            why,
+        )
+        self._stale_temperature = None
+        self._clear_issue(ISSUE_TEMPERATURE_STALE)
+
+    @callback
+    def _retry_stale_reading(self, source: str) -> None:
+        """A person asked for heat: judge the sensor again from the start.
+
+        Without this the failsafe could hold for ever. It keeps the element
+        off, a tank that is not heated and sits at room temperature may not
+        move half a degree for days, and a restart restores the hold. So the
+        owner who has changed the battery, or reset a breaker that made a dead
+        element look like a dead sensor, could not get heat back. A person
+        choosing a heating mode gets the sensor's present number taken at its
+        word again and the count started from zero: if the tank is then
+        heated for STALE_READING_AFTER and the number still has not moved, the
+        failsafe is back. Only a person: nothing restored, timed or carried
+        comes through here, so it cannot switch an element on at a restart.
+        """
+        if self._stale_temperature is None:
+            return
+        stuck = self._stale_temperature
+        self._release_stale_reading(f"a person asked for heat: {source}")
+        now = dt_util.utcnow()
+        if self._awaiting_first_reading:
+            # A restart, and the sensor has not spoken yet: nothing to take at
+            # its word. The first reading is now an ordinary one.
+            self._heating_watch.restart(now, None)
+            return
+        state = self.hass.states.get(self.sensor_entity_id)
+        reading = finite(state.state) if state is not None else None
+        if reading is not None:
+            # The number it was stuck on, not the entity's raw state: that is
+            # the last one the spike filter let through. A wild value the
+            # filter is still holding (75 on a tank at 40, a reviewer's repro)
+            # was taken at its word here, and the heat just asked for refused.
+            # A real move would have ended the hold already.
+            reading = stuck
+        self._heating_watch.restart(now, reading)
+        if reading is None:
+            # The sensor says nothing at all now: an ordinary lost reading,
+            # held already, with the clocks a lost reading has.
+            self._start_failsafe_warning()
+            self._start_outage_watch("sensor")
+            return
+        self._current_temperature = reading
+        self._temperature_lost = False
+
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
         # Anything that is not a finite number is a missing reading. The
@@ -244,6 +438,22 @@ class SwitchControlMixin:
             return
         # The first reading, or the end of the wait for it.
         self._end_first_reading_wait()
+        if self._stale_temperature is not None and reading is not None:
+            if not moved(reading, self._stale_temperature, STALE_READING_BAND):
+                # The same number again: the bridge replaying what it has
+                # cached (after a restart of its own, or of Home Assistant),
+                # or the entity back from unavailable with nothing new. A
+                # number that has not moved ends nothing. If a detour through
+                # unavailable started the lost-reading clocks, they stop: the
+                # sensor is back, and what is wrong with it has its own repair.
+                self._end_failsafe_warning()
+                self._end_outage_watch("sensor")
+                self._hold_stale_reading(self._stale_temperature)
+                await self._async_control_heating()
+                self.async_write_ha_state()
+                return
+            self._release_stale_reading(f"it moved to {reading:g}")
+        reading_moved = False
         if reading is None:
             # Failsafe. The control pass at the end of this method switches
             # the element off and holds it off for as long as the reading is
@@ -277,6 +487,9 @@ class SwitchControlMixin:
                 self._end_failsafe_warning()
                 self._end_outage_watch("sensor")
             self._temperature_lost = False
+            # A missing reading is not passed on: it neither moves the count
+            # nor clears what it is measured from (reading_health.py).
+            reading_moved = self._heating_watch.reading(dt_util.utcnow(), reading)
 
         _LOGGER.debug(
             "%s: sensor changed -> current_temperature=%s, target=%s, cold_tolerance=%s, hot_tolerance=%s",
@@ -295,6 +508,7 @@ class SwitchControlMixin:
         )
 
         await self._async_control_heating()
+        self._refresh_heating_watch(restarted=reading_moved)
 
     @callback
     def _async_switch_changed(self, event):
@@ -466,7 +680,20 @@ class SwitchControlMixin:
                 self._pending_switch_state = None
 
         if self._surplus_active:
-            self._note_boost_heating(dt_util.utcnow())
+            # A run begins at the relay really switching on, outside the
+            # startup grace (where relays replay states with no command
+            # behind them). Any other switch event only clears the stamp.
+            self._note_boost_heating(
+                dt_util.utcnow(),
+                came_on=(
+                    not self._startup_grace_active
+                    and old_state is not None
+                    and old_state.state == STATE_OFF
+                    and new_state is not None
+                    and new_state.state == STATE_ON
+                ),
+            )
+        self._refresh_heating_watch()
         self._debug_log_hvac_action("switch state update")
         self._update_smart_eco_state()
         self.async_write_ha_state()

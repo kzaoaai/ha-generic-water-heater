@@ -393,6 +393,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     for kind in (
         "temperature_sensor_unavailable",
+        "temperature_sensor_stale",
         "heater_switch_unavailable",
         "disinfection_gave_up",
     ):

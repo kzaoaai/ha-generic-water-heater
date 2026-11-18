@@ -13,6 +13,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+import homeassistant.util.dt as dt_util
 
 from . import DOMAIN, async_get_fleet
 
@@ -50,6 +51,15 @@ async def async_get_config_entry_diagnostics(
             "effective_target_temperature": heater._effective_target_temperature(),
             "temperature_lost": heater._temperature_lost,
             "awaiting_first_reading": heater._awaiting_first_reading,
+            # The stale-reading watch: the number the sensor is held stale
+            # on (None: not held), what the count is measured from, whether
+            # the tank counts as heated now and the heated seconds counted.
+            "stale_temperature": heater._stale_temperature,
+            "reading_watch_baseline": heater._heating_watch.baseline,
+            "heated_now": heater._heated,
+            "heated_without_a_move_s": heater._heating_watch.heated_for(
+                dt_util.utcnow()
+            ).total_seconds(),
             "last_commanded_switch_state": heater._last_commanded_switch_state,
             "pending_switch_state": heater._pending_switch_state,
             "last_switch_change_time": heater._last_switch_change_time,
@@ -76,6 +86,7 @@ async def async_get_config_entry_diagnostics(
                     "_first_reading_timer",
                     "_switch_unavailable_timer",
                     "_manual_performance_timer",
+                    "_stale_reading_timer",
                 )
             },
             "attributes": heater.extra_state_attributes,

@@ -264,8 +264,16 @@ async def test_a_short_window_without_boost_heat_is_not_locked_out(hass, world):
         assert heater(hass).attributes["surplus_boost_locked_until"] is None
 
 
-async def test_the_lockout_never_stops_normal_heating(hass, world):  # noqa: F811
-    """Locked out, a tank below its normal target still heats on surplus."""
+async def test_a_lockout_withholds_normal_heating_on_the_same_surplus(hass, world):  # noqa: F811
+    """Locked out, the surplus does not count for the eco gate either (4.6.8).
+
+    Until 4.6.7 this test read the other way: a tank below its normal target
+    still heated on a locked-out surplus, so the lockout changed nothing for
+    it and its relay followed every flap (2026-11-18: 15 operations in 100
+    minutes). The surplus that could not carry the boost a minute ago cannot
+    carry normal heating either: it is the same element. More in
+    test_surplus_lockout.py.
+    """
     with freeze_time(T0) as frozen:
         await boosting(hass)
         await set_state(hass, PV_EXCESS, STATE_ON)
@@ -276,6 +284,12 @@ async def test_the_lockout_never_stops_normal_heating(hass, world):  # noqa: F81
         hass.states.async_set(UPSTAIRS_SENSOR, "45", {"device_class": "temperature"})
         await hass.async_block_till_done()
         await set_state(hass, PV_EXCESS, STATE_ON)
+        assert not switch_on(hass)
+        assert heater(hass).state == STATE_OFF, "parked by the gate"
+
+        frozen.tick(SURPLUS_BOOST_LOCKOUT)
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
         assert switch_on(hass)
         assert heater(hass).state == STATE_ELECTRIC
 
