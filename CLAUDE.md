@@ -751,8 +751,12 @@ the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py`, `element_heal
     bridge, and the bridge replays the device's last cached value when Home Assistant comes back.
     The device itself had last reported nine hours earlier (next item). So the first-reading wait
     can be ended by an old value, and so could the 09:40 one below.
-- **4.6.8 is released and has not run on hardware.** Both of its changes came out of what prod
-  showed on 2026-11-18 and neither has been seen there since:
+- **4.6.8 has been live on prod since the restart of 2026-11-18 21:19 UTC**, on Home Assistant
+  2026.11.2 (the tests still run on 2026.10.2). Both heaters came back parked by Smart Eco with
+  their state, no `stale_temperature` and no lockout; neither relay was commanded (one switch
+  entity was `unavailable` for 5 s and came back `off`, as it was), and the log has nothing from
+  the integration. Neither change has been seen doing its job on hardware yet: there was no
+  heating and no surplus at that hour. Both came out of what prod showed on 2026-11-18:
   - The stale-reading failsafe ("A reading that does not move while the tank is heated is a lost
     reading"). The incident: one tank's sensor made its last report at 05:18 UTC and its bridge
     went on serving 28.9 C through two restarts; from 11:00 UTC the element drew about 1.19 kW
