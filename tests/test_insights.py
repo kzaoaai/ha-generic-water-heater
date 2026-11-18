@@ -6,10 +6,15 @@ from zoneinfo import ZoneInfo
 from freezegun import freeze_time
 from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 import homeassistant.util.dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
+from custom_components.generic_water_heater import (
+    LEGIONELLA_MODE_ASAP,
+    LEGIONELLA_MODE_OFF,
+)
 from custom_components.generic_water_heater.config_flow import _forecast_preheat_errors
 from custom_components.generic_water_heater.energy_split import (
     MAX_GAP,
@@ -20,6 +25,7 @@ from custom_components.generic_water_heater.heat_rate import (
     HeatRateLearner,
     ready_at,
 )
+from custom_components.generic_water_heater.insights import heat_rate_signal
 from tests.test_eco_inputs import (  # noqa: F401
     BOOST,
     heater,
@@ -34,6 +40,7 @@ from tests.test_integration_setup import (  # noqa: F401  (fixtures)
     UPSTAIRS_SENSOR,
     UPSTAIRS_SWITCH,
     auto_enable_custom_integrations,
+    entities,
     world,
 )
 
@@ -169,6 +176,116 @@ async def test_the_rate_is_learned_from_a_metered_run_and_feeds_ready_at(hass, w
             17 / 9 * 3600, abs=180
         )
         assert hass.states.get(READY).attributes["heading_for"] == 60.0
+
+
+async def _learn_a_rate_and_draw(hass, frozen):
+    """A 9 C/h run learned, the tank at 43 C, the element drawing again."""
+    _meter(hass, "1500")
+    await hass.async_block_till_done()
+    for step in range(1, 7):
+        await tick(hass, frozen, 20 / 6)
+        await reading(hass, 40 + step * 0.5)
+    _meter(hass, "0")
+    await hass.async_block_till_done()
+    _meter(hass, "1500")
+    await hass.async_block_till_done()
+
+
+async def test_ready_at_follows_a_new_target_without_a_new_reading(hass, world):
+    """Ready At waited for the next tank reading after the target was changed."""
+    with freeze_time(TRIGGER) as frozen:
+        _meter(hass, "0")
+        await _setup(hass, power_sensor=METER, target_temp=60.0)
+        await _learn_a_rate_and_draw(hass, frozen)
+        before = dt_util.parse_datetime(hass.states.get(READY).state)
+        assert hass.states.get(READY).attributes["heading_for"] == 60.0
+
+        await hass.services.async_call(
+            "water_heater",
+            "set_temperature",
+            {"entity_id": heater(hass).entity_id, "temperature": 50},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert hass.states.get(READY).attributes["heading_for"] == 50.0
+        after = dt_util.parse_datetime(hass.states.get(READY).state)
+        # 43 -> 50 C at 9 C/h, about 47 minutes, instead of the 113 for 60 C.
+        assert (after - dt_util.utcnow()).total_seconds() == pytest.approx(
+            7 / 9 * 3600, abs=180
+        )
+        assert after < before
+
+
+async def test_ready_at_follows_a_surplus_boost_starting_and_ending(hass, world):
+    """The boost raises what the tank heads for; Ready At kept the old goal."""
+    with freeze_time(TRIGGER) as frozen:
+        _meter(hass, "0")
+        await _setup(
+            hass,
+            power_sensor=METER,
+            target_temp=50.0,
+            surplus_entity=PV_EXCESS,
+            surplus_state="on",
+            surplus_boost_target_temperature=60.0,
+        )
+        await _learn_a_rate_and_draw(hass, frozen)
+        assert hass.states.get(READY).attributes["heading_for"] == 50.0
+
+        await hass.services.async_call("switch", "turn_on", {"entity_id": BOOST}, blocking=True)
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        assert heater(hass).attributes["surplus_boost_active"] is True
+        assert hass.states.get(READY).attributes["heading_for"] == 60.0
+
+        hass.states.async_set(PV_EXCESS, STATE_OFF)
+        await hass.async_block_till_done()
+        assert heater(hass).attributes["surplus_boost_active"] is False
+        assert hass.states.get(READY).attributes["heading_for"] == 50.0
+
+
+async def test_ready_at_follows_a_disinfection_cycle_starting_and_ending(hass, world):
+    """A cycle heads for 60 C whatever the target is; Ready At kept the target."""
+    with freeze_time(TRIGGER) as frozen:
+        _meter(hass, "0")
+        await _setup(hass, power_sensor=METER, target_temp=50.0)
+        await _learn_a_rate_and_draw(hass, frozen)
+        upstairs = entities(hass)["Upstairs"]
+        assert hass.states.get(READY).attributes["heading_for"] == 50.0
+
+        await upstairs.async_set_legionella_mode(LEGIONELLA_MODE_ASAP, "test")
+        await hass.async_block_till_done()
+        assert upstairs._disinfecting, "test premise: a cycle is running"
+        assert hass.states.get(READY).attributes["heading_for"] == 60.0
+
+        await upstairs.async_set_legionella_mode(LEGIONELLA_MODE_OFF, "test")
+        await hass.async_block_till_done()
+        assert not upstairs._disinfecting
+        assert hass.states.get(READY).attributes["heading_for"] == 50.0
+
+
+async def test_the_heater_tells_ready_at_only_when_its_goal_moved(hass, world):
+    """The heater writes its state on every control pass; most change no goal."""
+    with freeze_time(TRIGGER):
+        _meter(hass, "0")
+        entry = await _setup(hass, power_sensor=METER, target_temp=60.0)
+        upstairs = entities(hass)["Upstairs"]
+        told = []
+        unsub = async_dispatcher_connect(
+            hass, heat_rate_signal(entry.entry_id), lambda: told.append(upstairs.heating_goal())
+        )
+
+        upstairs.async_write_ha_state()
+        upstairs.async_write_ha_state()
+        await hass.async_block_till_done()
+        assert told == []
+
+        upstairs._target_temperature = 55.0
+        upstairs.async_write_ha_state()
+        upstairs.async_write_ha_state()
+        await hass.async_block_till_done()
+        unsub()
+        assert told == [55.0]
 
 
 async def test_energy_today_by_source(hass, world):

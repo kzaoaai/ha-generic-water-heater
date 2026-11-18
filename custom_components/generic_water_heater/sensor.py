@@ -55,6 +55,7 @@ from . import (
     legionella_risk_signal,
     smart_eco_state_signal,
 )
+from .temperature_filter import finite
 from .temperature_tracking import async_track_filtered_temperature
 from .element_health import NO_DRAW_W, to_watts
 from .energy_split import SOURCES
@@ -681,9 +682,10 @@ class MaxTemperatureHistorySensor(SensorEntity, RestoreEntity):
         if state_value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
 
-        try:
-            temperature = float(state_value)
-        except (TypeError, ValueError):
+        # Finite only: the startup read does not come through the tracking
+        # helper, and a "nan" there made the weekly maximum NaN.
+        temperature = finite(state_value)
+        if temperature is None:
             _LOGGER.debug("Ignoring non-numeric temperature state %s", state_value)
             return
 
@@ -1060,9 +1062,11 @@ class LegionellaRiskSensor(SensorEntity, RestoreEntity):
         """Add a temperature sample and advance the disinfection hold."""
         if state_value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
-        try:
-            temperature = float(state_value)
-        except (TypeError, ValueError):
+        # Finite only: the startup read does not come through the tracking
+        # helper, and a "nan" there opened a disinfection hold (it is "not
+        # below" every threshold, because every comparison with it is false).
+        temperature = finite(state_value)
+        if temperature is None:
             return
 
         timestamp = when or dt_util.utcnow()

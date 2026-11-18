@@ -6,6 +6,7 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.water_heater import (
+    ATTR_OPERATION_MODE,
     DEFAULT_MIN_TEMP,
     DEFAULT_MAX_TEMP,
     WaterHeaterEntity,
@@ -25,7 +26,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, Event, EventStateChangedData, State, callback
-from homeassistant.exceptions import TemplateError
+from homeassistant.exceptions import ServiceValidationError, TemplateError
 from homeassistant.helpers.event import (
     TrackTemplate,
     TrackTemplateResult,
@@ -103,12 +104,14 @@ from . import (
     LEGIONELLA_ONE_SHOT_MODES,
 )
 from .fleet import DEFAULT_STAGGER_SECONDS
+from .insights import heat_rate_signal
 from .switch import (
     DEFAULT_BOOST_ENABLED,
     DEFAULT_USE_UTILITY,
     RUNTIME_BOOST_ENABLED,
     RUNTIME_USE_UTILITY,
 )
+from .temperature_filter import finite
 from .temperature_tracking import async_track_filtered_temperature
 from .water_heater_const import (  # noqa: F401  (re-exported for tests)
     STARTUP_GRACE,
@@ -475,6 +478,8 @@ class GenericWaterHeater(
         # operation mode, so respecting them needs no code here at all.
         self._legionella_mode = LEGIONELLA_MODE_OFF
         self._disinfecting = False
+        # The goal Ready At was last told about (see _async_write_ha_state).
+        self._announced_goal: float | None = None
         self._disinfection_prior_mode: str | None = None
         self._disinfection_started_at: str | None = None
         # After a standing policy gives up: no new cycle before this time.
@@ -525,6 +530,24 @@ class GenericWaterHeater(
             attributes,
             self._off_until_target_for_disinfection,
         )
+
+    @callback
+    def _async_write_ha_state(self) -> None:
+        """Publish the state, and tell Ready At when what the tank heads for moved.
+
+        Ready At recomputed only on tank readings and element changes, so a new
+        target, a boost starting or ending or a disinfection cycle left its
+        heading_for and estimate stale until the next reading, which can be many
+        minutes. Every input of heating_goal() is published as state or an
+        attribute, so each change of the goal comes with a write, and every
+        write comes through here (this is the method core names for
+        customising one; async_write_ha_state itself is final).
+        """
+        super()._async_write_ha_state()
+        goal = self.heating_goal()
+        if goal != self._announced_goal:
+            self._announced_goal = goal
+            async_dispatcher_send(self.hass, heat_rate_signal(self._entry_id))
 
     @property
     def extra_state_attributes(self):
@@ -649,24 +672,59 @@ class GenericWaterHeater(
 
     @property
     def min_temp(self):
-        """Return the minimum targetable temperature."""
-        """If the min temperature is not set on the config, returns the HA default for Water Heaters."""
+        """Return the minimum targetable temperature.
+
+        Home Assistant's default for water heaters when the config sets none.
+        """
         if self._min_temp is None:
-            return TemperatureConverter.convert(DEFAULT_MIN_TEMP, UnitOfTemperature.FAHRENHEIT, self._unit_of_measurement) 
+            return TemperatureConverter.convert(DEFAULT_MIN_TEMP, UnitOfTemperature.FAHRENHEIT, self._unit_of_measurement)
         return self._min_temp
 
     @property
     def max_temp(self):
-        """Return the maximum targetable temperature."""
-        """If the max temperature is not set on the config, returns the HA default for Water Heaters."""
+        """Return the maximum targetable temperature.
+
+        Home Assistant's default for water heaters when the config sets none.
+        """
         if self._max_temp is None:
-            return TemperatureConverter.convert(DEFAULT_MAX_TEMP, UnitOfTemperature.FAHRENHEIT, self._unit_of_measurement) 
+            return TemperatureConverter.convert(DEFAULT_MAX_TEMP, UnitOfTemperature.FAHRENHEIT, self._unit_of_measurement)
         return self._max_temp
 
     async def async_set_temperature(self, **kwargs):
-        """Set new target temperatures."""
+        """Set a new target temperature, and the operation mode sent with it.
+
+        Core's set_temperature service takes an optional operation_mode beside
+        the temperature and hands both over. The mode used to be dropped
+        without a word. It is a person's choice like set_operation_mode, so it
+        goes through that method and gets everything that follows from one.
+        """
+        operation_mode = kwargs.get(ATTR_OPERATION_MODE)
+        # Core checks the mode against operation_list for set_operation_mode
+        # but not for this service. Refused before anything changes, so a bad
+        # call does not half apply.
+        if operation_mode is not None and operation_mode not in self.operation_list:
+            raise ServiceValidationError(
+                translation_domain="water_heater",
+                translation_key="not_valid_operation_mode",
+                translation_placeholders={
+                    "entity_id": self.entity_id,
+                    "operation_mode": operation_mode,
+                    "operation_list": ", ".join(self.operation_list),
+                },
+            )
+
         self._target_temperature = kwargs.get(ATTR_TEMPERATURE)
         _LOGGER.debug("%s: async_set_temperature -> target=%s", self.name, self._target_temperature)
+
+        # Only a mode that differs from the one the entity reports is a choice.
+        # A client that sends back the mode it read is not a person choosing
+        # it: through set_operation_mode it would drop the deadline of a
+        # wall-switch performance run and leave that run unbounded, and lift a
+        # shed the load balancer has in force.
+        if operation_mode is not None and operation_mode != self._current_operation:
+            # Its control pass sees the target stored above.
+            await self.async_set_operation_mode(operation_mode)
+            return
         await self._async_control_heating()
 
     async def async_set_operation_mode(self, operation_mode, *, eco_already_paused=False):
@@ -1041,11 +1099,14 @@ class GenericWaterHeater(
             self._target_temperature = self.min_temp
 
         temp_sensor = self.hass.states.get(self.sensor_entity_id)
-        if temp_sensor and temp_sensor.state not in (
-            STATE_UNAVAILABLE,
-            STATE_UNKNOWN,
-        ):
-            self._current_temperature = float(temp_sensor.state)
+        if temp_sensor is not None:
+            # Unavailable, unknown and anything else that is not a finite
+            # number are all "no reading yet". float() used to raise on a
+            # non-numeric state, which failed the entity's setup, and to accept
+            # "nan", which no comparison can act on.
+            startup_reading = finite(temp_sensor.state)
+            if startup_reading is not None:
+                self._current_temperature = startup_reading
 
         heater_switch = self.hass.states.get(self.heater_entity_id)
         if heater_switch and heater_switch.state not in (
@@ -1146,7 +1207,3 @@ class GenericWaterHeater(
         self._cooldown_timer = None
         self._smart_eco_resume_timer = None
         await super().async_will_remove_from_hass()
-
-    # --- Repairs ----------------------------------------------------------------
-
-

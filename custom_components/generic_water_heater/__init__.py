@@ -381,8 +381,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # not run -- an unregister with no `now` cannot stash.
         fleet = domain_data.get(FLEET_KEY)
         if fleet is not None:
-            fleet.unregister(entry.entry_id, dt_util.utcnow())
-            if fleet.is_empty and not _has_entry_runtime(domain_data):
+            now = dt_util.utcnow()
+            fleet.unregister(entry.entry_id, now)
+            # Keep the fleet while it holds unexpired departed anchors: when
+            # every entry reloads together they are the only record that a
+            # sibling's element started seconds ago. Once they expire the
+            # fleet is empty weight, but nothing sweeps it until the next
+            # unload or a restart; one idle object is harmless.
+            if not fleet.holds_state(now) and not _has_entry_runtime(domain_data):
                 domain_data.pop(FLEET_KEY, None)
     return unload_ok
 

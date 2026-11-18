@@ -213,6 +213,12 @@ async def test_the_meter_check_reads_no_draw_and_unchanged_since(hass):
         hass.states.async_set("sensor.element_power", "-5", {"unit_of_measurement": "W"})
         assert check(at(40)) is False, "a negative reading is not evidence"
 
+        frozen.tick(timedelta(minutes=1))
+        hass.states.async_set("sensor.element_power", "1.2", {"unit_of_measurement": "KW"})
+        assert check(at(41)) is False, (
+            "1.2 KW is a draw: read as 1.2 W it credited a hold the element was heating"
+        )
+
     assert _element_off_since(hass, "switch.element", None)(at(0)) is False
 
 

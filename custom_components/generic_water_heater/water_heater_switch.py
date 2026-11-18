@@ -16,6 +16,7 @@ from homeassistant.helpers.event import async_call_later, async_track_point_in_u
 from homeassistant.helpers import issue_registry as ir
 import homeassistant.util.dt as dt_util
 from . import DOMAIN, SMART_ECO_MODE_OFF_UNTIL_TARGET
+from .temperature_filter import finite
 from .water_heater_const import (
     OWN_ECHO_WINDOW,
     OUTAGE_REPAIR_AFTER,
@@ -183,7 +184,12 @@ class SwitchControlMixin:
 
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
-        if value is None or value in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        # Anything that is not a finite number is a missing reading. The
+        # tracking helper already delivers such states as unknown; this does
+        # not rely on it, because the other answer to a value it cannot use
+        # was to return and leave the element as it was.
+        reading = finite(value)
+        if reading is None:
             # Failsafe. The control pass at the end of this method switches
             # the element off and holds it off for as long as the reading is
             # missing (see _async_control_heating). Turning it off here alone
@@ -205,10 +211,7 @@ class SwitchControlMixin:
             self._current_temperature = None
             self._temperature_lost = True
         else:
-            try:
-                self._current_temperature = float(value)
-            except (TypeError, ValueError):
-                return
+            self._current_temperature = reading
             if self._temperature_lost:
                 # Only worth an INFO line when the entry was worth a WARNING.
                 _LOGGER.log(
@@ -795,7 +798,8 @@ class SwitchControlMixin:
         # A boost stops AT its target (4.5.1), so the number the owner set is
         # the peak: with the hot tolerance on top, a 61 C boost ran to 64 C. The
         # cold tolerance still decides when it starts again.
-        if self._surplus_boost_active():
+        boosting = self._surplus_boost_active()
+        if boosting:
             upper_threshold = target
         else:
             upper_threshold = target + self._hot_tolerance
@@ -809,7 +813,16 @@ class SwitchControlMixin:
             self._hot_tolerance,
         )
         
-        if self._current_temperature <= lower_threshold and self._current_operation == STATE_ELECTRIC:
+        # With a cold tolerance of 0 both thresholds are the boost target, and
+        # the turn-on test below would win at exactly that reading, so the boost
+        # ran one reading past its target. During a boost the stop is tested
+        # first. Outside one the order is unchanged: zero tolerances still ask
+        # for heat at exactly the normal target.
+        if boosting and self._current_temperature >= upper_threshold:
+            _LOGGER.debug("%s: current >= boost target -> turning OFF", self.name)
+            self._debug_log("decision: current %.1f >= boost target %.1f -> switch OFF", self._current_temperature, upper_threshold)
+            await self._async_heater_turn_off()
+        elif self._current_temperature <= lower_threshold and self._current_operation == STATE_ELECTRIC:
             _LOGGER.debug("%s: current <= (target - cold_tolerance) -> turning ON", self.name)
             self._debug_log("decision: current %.1f <= threshold %.1f (%.1f°C gap) -> switch ON", self._current_temperature, lower_threshold, lower_threshold - self._current_temperature)
             await self._async_heater_turn_on()

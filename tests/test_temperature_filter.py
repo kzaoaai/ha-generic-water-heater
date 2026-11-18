@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from freezegun import freeze_time
 import pytest
 from homeassistant.components.water_heater import STATE_ELECTRIC
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 import homeassistant.util.dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
@@ -162,6 +162,37 @@ async def test_wrapper_never_delays_unavailable(hass, world, received):  # noqa:
     assert received == [STATE_UNAVAILABLE, 80.0]
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "error", ""])
+async def test_wrapper_delivers_a_state_that_is_not_a_finite_number_as_unknown(  # noqa: F811
+    hass, world, received, bad
+):
+    """Consumers have one no-reading path, and it is the one for unknown."""
+    hass.states.async_set(UPSTAIRS_SENSOR, "80")  # pending
+    hass.states.async_set(UPSTAIRS_SENSOR, bad)
+    await hass.async_block_till_done()
+    assert received == [STATE_UNKNOWN]
+    # The pending reading was dropped with the timer, and the reference reset.
+    async_fire_time_changed(hass, dt_util.utcnow() + SPIKE_CONFIRM + timedelta(seconds=1))
+    await hass.async_block_till_done()
+    assert received == [STATE_UNKNOWN]
+    hass.states.async_set(UPSTAIRS_SENSOR, "80")
+    await hass.async_block_till_done()
+    assert received == [STATE_UNKNOWN, 80.0]
+
+
+async def test_wrapper_does_not_prime_from_nan(hass, world):  # noqa: F811
+    """A NaN reference would make every later comparison false, spikes included."""
+    hass.states.async_set(UPSTAIRS_SENSOR, "nan")
+    got = []
+    unsub = async_track_filtered_temperature(
+        hass, UPSTAIRS_SENSOR, lambda value, when, attrs: got.append(value)
+    )
+    hass.states.async_set(UPSTAIRS_SENSOR, "50")
+    await hass.async_block_till_done()
+    unsub()
+    assert got == [50.0]
+
+
 async def test_wrapper_accepts_a_real_step_after_the_confirm_window(hass, world, received):  # noqa: F811
     hass.states.async_set(UPSTAIRS_SENSOR, "55")
     await hass.async_block_till_done()
@@ -289,3 +320,31 @@ async def test_the_seven_day_maximum_does_not_keep_a_hot_spike(hass, world):  # 
         s.state for s in hass.states.async_all("sensor") if "highest" in s.entity_id
     ]
     assert maxima == ["45.1"]
+
+
+async def test_a_nan_tank_state_at_startup_is_not_a_hot_reading(hass, world):  # noqa: F811
+    """The startup read bypasses the tracking helper and parsed "nan" as a float.
+
+    Every comparison with NaN is false, so the legionella hold counted it as a
+    tank above the sustain threshold, and the weekly maximum became NaN.
+    """
+    hass.states.async_set(UPSTAIRS_SENSOR, "nan")
+    entry = build_entry(
+        "Upstairs",
+        UPSTAIRS_SWITCH,
+        UPSTAIRS_SENSOR,
+        **{CONF_ENABLE_LEGIONELLA_SENSOR: True, CONF_ENABLE_MAX_TEMP_HISTORY_SENSOR: True},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.upstairs_highest_temperature_7_days").state in (
+        "unknown",
+        "unavailable",
+    )
+    risk = hass.states.get("sensor.upstairs_legionella_risk")
+    assert risk.state != "Low"
+    assert risk.attributes["hold_in_progress"] is False, (
+        "a tank with no reading opened a disinfection hold"
+    )

@@ -48,6 +48,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import math
+from typing import Any
 
 # A single report-to-report step this large is not water. Heating moves a tank
 # a fraction of a degree a minute and a draw a degree or two; a sensor reporting
@@ -58,6 +60,22 @@ SPIKE_JUMP_C = 10.0
 # at face value. Long enough for a chatty sensor to report again, short enough
 # that a real step costs the control loop at most a minute.
 SPIKE_CONFIRM = timedelta(seconds=60)
+
+
+def finite(state: Any) -> float | None:
+    """``state`` as a finite number, or None when it is not one.
+
+    "nan", "inf" and "-inf" parse as floats and are not readings: every
+    comparison with NaN is false, so a threshold can neither start nor stop
+    anything on one, and -inf is below every threshold there is. Home Assistant
+    refuses them from a temperature sensor entity, but a template or an MQTT
+    entity with no device class can carry them, as it can carry "error".
+    """
+    try:
+        value = float(state)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 @dataclass(frozen=True)

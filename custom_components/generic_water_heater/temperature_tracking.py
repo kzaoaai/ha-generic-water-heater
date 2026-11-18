@@ -23,11 +23,12 @@ from homeassistant.core import (
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
-from .temperature_filter import SPIKE_CONFIRM, SpikeFilter
+from .temperature_filter import SPIKE_CONFIRM, SpikeFilter, finite
 
-# (state value, timestamp, attributes). The value is the raw state string for
-# unavailable/unknown/non-numeric states, a float for numeric ones, or None when
-# the entity was removed -- the same cases the consumers already distinguish.
+# (state value, timestamp, attributes). The value is a finite float for a usable
+# reading, STATE_UNAVAILABLE or STATE_UNKNOWN when the sensor has no reading
+# (a non-numeric or non-finite state such as "error", "" or "nan" is delivered
+# as STATE_UNKNOWN), or None when the entity was removed.
 TemperatureAction = Callable[[Any, datetime, dict[str, Any]], Any]
 
 
@@ -65,22 +66,28 @@ def async_track_filtered_temperature(
         new_state = event.data.get("new_state")
         when = event.time_fired or dt_util.utcnow()
 
-        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        value = None if new_state is None else finite(new_state.state)
+        if value is None:
             # Never delayed: the control loop's failsafe acts on these.
             _cancel_timer()
             spike_filter.reset()
-            value = None if new_state is None else new_state.state
-            attrs = {} if new_state is None else dict(new_state.attributes)
-            hass.async_run_hass_job(job, value, when, attrs)
+            if new_state is None:
+                hass.async_run_hass_job(job, None, when, {})
+                return
+            # A state that is not a finite number ("error", "", "nan", "inf")
+            # is no reading either. It is delivered as unknown, so that every
+            # consumer's no-reading path runs: it used to reach the heater as a
+            # string it ignored or as a float no comparison could act on, and
+            # an element that was on kept running with no reading behind it.
+            lost = (
+                STATE_UNAVAILABLE
+                if new_state.state == STATE_UNAVAILABLE
+                else STATE_UNKNOWN
+            )
+            hass.async_run_hass_job(job, lost, when, dict(new_state.attributes))
             return
 
         attributes = dict(new_state.attributes)
-        try:
-            value = float(new_state.state)
-        except (TypeError, ValueError):
-            hass.async_run_hass_job(job, new_state.state, when, attributes)
-            return
-
         previous = spike_filter.pending
         readings = spike_filter.add(when, value)
         _cancel_timer()
@@ -94,10 +101,8 @@ def async_track_filtered_temperature(
             timer = async_call_later(hass, SPIKE_CONFIRM.total_seconds(), _expired)
 
     if (current := hass.states.get(entity_id)) is not None:
-        try:
-            spike_filter.prime(float(current.state))
-        except (TypeError, ValueError):
-            pass
+        if (primed := finite(current.state)) is not None:
+            spike_filter.prime(primed)
 
     unsub_state = async_track_state_change_event(hass, [entity_id], _changed)
 

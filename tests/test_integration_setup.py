@@ -613,3 +613,49 @@ async def test_attribute_only_switch_updates_do_not_hold_off_a_deferred_off(hass
     # Nor were they read as a person switching it back on.
     assert upstairs._smart_eco_pause_reason is None
     assert upstairs.state == STATE_OFF
+
+
+async def test_every_entry_reloading_together_keeps_the_stagger_anchor(hass, world):
+    """Unloading the last entry dropped the fleet and its departed anchors.
+
+    One heater's element starts, then every entry unloads and comes back while
+    Home Assistant keeps running. The element is off again by then, so this is
+    the surviving anchor and not the switch-found-on path. The sibling is
+    loaded first, so the heater whose anchor survives is not the one asking.
+    """
+    with freeze_time(TRIGGER) as clock:
+        upstairs, downstairs = await setup_both(hass)
+        world["turn_on"].clear()
+        hass.states.async_set(PV_EXCESS, STATE_ON)
+        await hass.async_block_till_done()
+        (first_switch,) = commanded(world["turn_on"])
+
+        for entry in (upstairs, downstairs):
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        hass.states.async_set(first_switch, STATE_OFF)
+        world["turn_on"].clear()
+        clock.tick(timedelta(seconds=10))
+
+        sibling, started = (
+            (downstairs, upstairs)
+            if first_switch == UPSTAIRS_SWITCH
+            else (upstairs, downstairs)
+        )
+        for entry in (sibling, started):
+            assert await hass.config_entries.async_setup(entry.entry_id)
+            await hass.async_block_till_done()
+            if entry is sibling:
+                assert commanded(world["turn_on"]) == [], (
+                    "the sibling stepped on seconds after the other element "
+                    f"started: {commanded(world['turn_on'])}"
+                )
+
+        # Deferred, not refused: it comes on once the stagger has passed.
+        sibling_switch = (
+            DOWNSTAIRS_SWITCH if first_switch == UPSTAIRS_SWITCH else UPSTAIRS_SWITCH
+        )
+        clock.tick(timedelta(seconds=61))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert sibling_switch in commanded(world["turn_on"])

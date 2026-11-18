@@ -201,6 +201,19 @@ class HeaterFleet:
         """Return True when no member is registered."""
         return not self._members
 
+    def holds_state(self, now: datetime) -> bool:
+        """Return True while the fleet still has something worth keeping.
+
+        That is a registered member, or a departed stagger anchor that has not
+        expired. The caller that owns the fleet's storage must not drop it
+        while this is true: when every entry unloads and comes back together,
+        the anchors are all that stops the first heater to ask from stepping
+        on beside a sibling whose element started seconds ago.
+        """
+        return bool(self._members) or any(
+            anchor.expires_at > now for anchor in self._departed.values()
+        )
+
     @property
     def stagger_seconds(self) -> float:
         """Return the longest stagger any member asks for.

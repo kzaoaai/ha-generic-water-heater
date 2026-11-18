@@ -17,6 +17,7 @@ import pytest
 
 from custom_components.generic_water_heater.fleet import (
     DEFAULT_STAGGER_SECONDS,
+    DEPARTED_ANCHOR_SECONDS,
     HeaterFleet,
 )
 
@@ -149,6 +150,41 @@ def test_unregistering_removes_the_sibling_constraint():
     fleet.unregister(UPSTAIRS)
 
     assert fleet.request_turn_on(DOWNSTAIRS, at(2)).admitted
+
+
+def test_a_fleet_holding_a_live_departed_anchor_has_state_worth_keeping():
+    """Dropping the fleet with its anchors let a full reload skip the stagger."""
+    fleet = build_fleet()
+    fleet.request_turn_on(UPSTAIRS, at(0))
+    assert fleet.holds_state(at(1))
+
+    fleet.unregister(UPSTAIRS, at(10))
+    fleet.unregister(DOWNSTAIRS, at(10))
+
+    assert fleet.is_empty
+    assert fleet.holds_state(at(11))
+
+
+def test_departed_anchors_stop_holding_the_fleet_once_they_expire():
+    """The fleet is only kept for as long as an anchor can still matter."""
+    fleet = build_fleet()
+    fleet.request_turn_on(UPSTAIRS, at(0))
+    fleet.unregister(UPSTAIRS, at(10))
+    fleet.unregister(DOWNSTAIRS, at(10))
+
+    just_before = at(10 + DEPARTED_ANCHOR_SECONDS - 1)
+    at_expiry = at(10 + DEPARTED_ANCHOR_SECONDS)
+    assert fleet.holds_state(just_before)
+    assert not fleet.holds_state(at_expiry)
+
+
+def test_an_empty_fleet_with_no_anchors_holds_nothing():
+    """Entries that never started an element leave nothing to preserve."""
+    fleet = build_fleet()
+    fleet.unregister(UPSTAIRS, at(0))
+    fleet.unregister(DOWNSTAIRS, at(0))
+
+    assert not fleet.holds_state(at(1))
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ from . import (
     async_resolve_heater_device,
 )
 from .element_health import HOLD, element_fault, to_watts
+from .temperature_filter import finite
 from .temperature_tracking import async_track_filtered_temperature
 
 _LOGGER = logging.getLogger(__name__)
@@ -430,9 +431,10 @@ class HotWaterInUseBinarySensor(BinarySensorEntity):
             self._evaluate(when)
             return
 
-        try:
-            temperature = float(state_value)
-        except (TypeError, ValueError):
+        # Finite only: the startup read does not come through the tracking
+        # helper, and a "nan" sample made every slope NaN until it aged out.
+        temperature = finite(state_value)
+        if temperature is None:
             return
 
         if self._samples and when <= self._samples[-1][0]:

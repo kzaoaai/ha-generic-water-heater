@@ -11,6 +11,7 @@ temperature, so it was never sent. The hold now lives in the control pass.
 from datetime import timedelta
 
 from freezegun import freeze_time
+import pytest
 from homeassistant.components.water_heater import STATE_ELECTRIC, STATE_PERFORMANCE
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 import homeassistant.util.dt as dt_util
@@ -130,3 +131,77 @@ async def test_setup_before_the_first_reading_does_not_cycle_the_relay(hass, wor
 
     assert UPSTAIRS_SWITCH not in commanded(world["turn_off"])
     assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+
+
+# "nan" and "inf" parse as floats, "error" and "" do not. Home Assistant refuses
+# all of them from a temperature sensor entity, so they need a source such as a
+# template or an input_text. None of them is a reading.
+NO_READING_STATES = ["nan", "inf", "-inf", "error", ""]
+
+
+@pytest.mark.parametrize("bad", NO_READING_STATES)
+@pytest.mark.parametrize("mode", [STATE_ELECTRIC, STATE_PERFORMANCE])
+async def test_a_state_that_is_not_a_number_is_a_missing_reading(hass, world, mode, bad):
+    """It used to leave an element that was on running, with no reading behind it.
+
+    A non-numeric state was dropped by the heater and kept the last temperature;
+    "nan" became the temperature, and every comparison with it is false, so
+    control kept whatever the element was doing. "-inf" would even have
+    switched it on.
+    """
+    with freeze_time(TRIGGER):
+        await heating_in(hass, mode, min_on_duration={"seconds": 300})
+        world["turn_on"].clear()
+
+        hass.states.async_set(UPSTAIRS_SENSOR, bad, {"device_class": "temperature"})
+        await hass.async_block_till_done()
+
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF, (
+            "the element stayed on with no usable reading"
+        )
+        assert UPSTAIRS_SWITCH not in commanded(world["turn_on"])
+        assert entities(hass)["Upstairs"]._temperature_lost
+
+        hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+        await hass.async_block_till_done()
+        assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_ON
+        assert not entities(hass)["Upstairs"]._temperature_lost
+
+
+@pytest.mark.parametrize("bad", ["nan", "error", ""])
+async def test_the_heater_itself_never_ignores_a_reading_it_cannot_use(hass, world, bad):
+    """Its handler used to return on a value it could not parse.
+
+    The tracking helper no longer delivers one, but the failsafe must not
+    depend on that: leaving the element as it was is the unsafe answer.
+    """
+    upstairs = await heating_in(hass, STATE_ELECTRIC)
+
+    await upstairs._async_sensor_changed(bad, dt_util.utcnow(), {})
+    await hass.async_block_till_done()
+
+    assert upstairs._temperature_lost
+    assert hass.states.get(UPSTAIRS_SWITCH).state == STATE_OFF
+
+
+@pytest.mark.parametrize("bad", ["nan", "-inf", "error"])
+async def test_a_tank_state_that_is_not_a_number_at_startup_is_no_reading_yet(
+    hass, world, bad
+):
+    """float() raised on "error" and failed the heater's setup; "nan" was kept.
+
+    At startup that is treated like unknown: no temperature, and not the
+    failsafe, because the source may simply not have a value yet (see
+    test_setup_before_the_first_reading_does_not_cycle_the_relay).
+    """
+    hass.states.async_set(UPSTAIRS_SENSOR, bad, {"device_class": "temperature"})
+    await setup_both(hass, stagger_seconds=0.0)
+
+    upstairs = entities(hass)["Upstairs"]
+    assert hass.states.get(UPSTAIRS) is not None, "the heater did not load"
+    assert upstairs.current_temperature is None
+    assert not upstairs._temperature_lost
+
+    hass.states.async_set(UPSTAIRS_SENSOR, "41", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert upstairs.current_temperature == 41.0

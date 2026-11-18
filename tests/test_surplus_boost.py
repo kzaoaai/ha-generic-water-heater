@@ -103,6 +103,45 @@ async def test_the_boost_stops_at_its_own_target(hass, world):  # noqa: F811
     assert not switch_on(hass)
 
 
+async def test_a_reading_exactly_at_the_boost_target_stops_the_boost(hass, world):  # noqa: F811
+    """With a cold tolerance of 0 both thresholds meet at the boost target.
+
+    The turn-on test came first, so a reading of exactly 61 kept the element on
+    and the boost ran one reading past its own target.
+    """
+    await boosting(hass)
+    await set_state(hass, PV_EXCESS, STATE_ON)
+    assert switch_on(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "60", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert switch_on(hass)
+    hass.states.async_set(UPSTAIRS_SENSOR, "61", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not switch_on(hass)
+    # The boost is still active; a further reading at the target does not
+    # start the element again.
+    assert heater(hass).attributes["surplus_boost_active"] is True
+    hass.states.async_set(UPSTAIRS_SENSOR, "61.0", {"device_class": "temperature"})
+    await hass.async_block_till_done()
+    assert not switch_on(hass)
+
+
+async def test_a_boost_does_not_start_at_exactly_its_target(hass, world):  # noqa: F811
+    """A tank already at the boost target must not be switched on by it."""
+    await boosting(hass, temperature="61")
+    await set_state(hass, PV_EXCESS, STATE_ON)
+    assert heater(hass).attributes["surplus_boost_active"] is True
+    assert not switch_on(hass)
+
+
+async def test_a_reading_exactly_at_the_normal_target_still_asks_for_heat(hass, world):  # noqa: F811
+    """Guard: outside a boost, zero tolerances still heat at exactly the target."""
+    await boosting(hass, temperature="50", enabled=False)
+    await set_state(hass, PV_EXCESS, STATE_ON)
+    assert heater(hass).attributes["surplus_boost_active"] is False
+    assert switch_on(hass)
+
+
 async def test_off_stays_off(hass, world):  # noqa: F811
     """A person's OFF, taken while boosting, holds through surplus coming back."""
     await boosting(hass)

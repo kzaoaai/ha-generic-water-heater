@@ -84,6 +84,12 @@ for it with the timed countdown. `turn_on` pauses first, the until-satisfied way
 `eco_already_paused=True` so the second pause does not replace it. Until 2026-11-16 it did, so the
 until-satisfied bypass could not be reached from a parked tank, the state ON is most often pressed in.
 
+`set_temperature` takes an `operation_mode` too (core passes it, and does not validate it for this
+service). It goes through `async_set_operation_mode` only when it differs from `_current_operation`:
+a client that sends back the mode it read is not a person choosing it, and through that method it
+would drop a wall-switch performance run's deadline and lift a load shed. A parked tank reports OFF,
+so OFF repeated changes only the target, and electric is the person's choice, pause and all.
+
 ### A load shed is not a satisfied tank
 
 `hvac_action` reports `off` only when the *operation mode* is off. A shed deliberately leaves the
@@ -110,14 +116,20 @@ reaches the stored copy for free.
 
 ### No reading, no heat — enforced in the control pass
 
-The failsafe is `_temperature_lost`: set when the sensor *reports* unavailable/unknown, cleared by
-the next reading, and while set `_async_control_heating` forces the switch off (past
+The failsafe is `_temperature_lost`: set when the sensor *reports* unavailable/unknown or any state
+that is not a finite number (`temperature_filter.finite`: `error`, an empty state, `nan`, `inf`),
+cleared by the next reading, and while set `_async_control_heating` forces the switch off (past
 `min_on_duration`, like a shed) before any heating branch. It lives in the control pass because
 every retry and reconcile comes back through it: a one-off turn_off at the sensor event was undone
 by the same pass in `performance` (which needs no temperature), and an OFF deferred by `min_on` was
 retried through the missing-temperature skip and never sent. It is **not** set by "no reading yet":
 setup runs a control pass before it reads the sensor, and treating that as the failsafe cycled a
 heating relay off and on at every options save (`test_setup_before_the_first_reading_does_not_cycle_the_relay`).
+
+The reading handler has no "ignore" branch. Until 2026-11-18 a value it could not parse made it
+return, and `nan` became the temperature, which no comparison can act on: either way an element
+that was on stayed on. Any new path that hands the heater a reading must end in a finite number or
+the failsafe, never in "leave it as it was".
 
 ### `performance` never reports idle
 
@@ -163,8 +175,11 @@ first pass deleted them and an adversarial review caught it:
 temperature sensor. A single reading >10 °C from the last accepted one is held until the next
 reading decides it (or 60 s pass). Combined relay/temperature devices emit one wild reading as the
 relay switches; before the filter, one such reading discarded a near-complete disinfection hold.
-`unavailable`/`unknown` are never delayed — the failsafe acts on them. A new consumer that
-subscribes with `async_track_state_change_event` directly reintroduces the bug.
+`unavailable`/`unknown` are never delayed — the failsafe acts on them. A state that is not a finite
+number is delivered as `unknown`, so each consumer's no-reading path runs. A new consumer that
+subscribes with `async_track_state_change_event` directly reintroduces the bug. The startup reads
+(`hass.states.get` in each entity's `async_added_to_hass`) do not come through the helper: they
+use `finite()` themselves.
 
 ### A Home Assistant start is not the eco condition going false
 
@@ -375,6 +390,15 @@ confirm the matching test goes red. Two hard-won rules:
 - **Check the mutation actually ran.** Deleting a statement can leave an `if` with no body — that is
   an `IndentationError`, and a non-zero exit looks exactly like a caught mutation. Parse the mutated
   source before trusting the result.
+- **Run the harness on a copy outside any synced folder** (a `git worktree` in a temp directory,
+  with the checkout's venv). In a synced folder, files rewritten in quick succession came back with
+  an earlier write's content: on 2026-11-18 two mutants were found still in place after a run whose
+  every restore had read back byte-identical, and later mutants were "caught" by the leftovers.
+  Afterwards, compare the real checkout against a saved `git diff HEAD`.
+- **Never `git stash` while worktrees are in use.** The stash belongs to the repository, not the
+  worktree: a pop takes whatever is on top. Agents told to stash in parallel worktrees swapped each
+  other's changes, and one landed in the main checkout. Take a change out with a patch file instead
+  (`git diff > x.patch`, `git checkout -- <paths>`, `git apply x.patch`).
 
 ### Record coverage honestly, including where there is none
 
@@ -500,27 +524,50 @@ the same pattern.
 - `test_meter_link.py`'s test of the pre-2026.9 guard skips on the 2026.10.2 venv. Run it on an
   older core when touching `LINKED_DEVICES_SINCE`, or drop the guard once no supported core needs it.
 - An external review (2026-11-16) was checked finding by finding: a code trace, a repro test, and a
-  second reviewer trying to overturn each verdict. 4.6.5 fixed its two real behaviour bugs. Verified
-  and still open, all low:
-  - With cold tolerance 0, a reading exactly at the boost target turns the element on (the ON test
-    comes first), so a boost stops one reading above its target, not at it.
-    `test_the_boost_stops_at_its_own_target` injects 61.5 and does not see it. Fix for the boost
-    only: test "at or above the upper threshold" first.
-  - Ready At recomputes only on `heat_rate_signal`, so `heading_for` and the estimate stay stale
-    after a target, boost or disinfection goal change until the next tank reading.
-  - Heat-up Rate is labelled `°C/h` whatever the unit system. `DISINFECTION_GOAL_C` also looks
-    unconverted in `heating_goal()` on a Fahrenheit install (read, not tested).
-  - `set_temperature` drops an `operation_mode` sent with it. Core requires the temperature, so the
-    target cannot be wiped that way.
-  - A non-numeric or non-finite tank state does not set the failsafe. Home Assistant refuses such a
-    state from a temperature sensor, so it needs a source the config flow's selector does not
-    offer; `nan` and `inf` parse as floats. If hardened, do it in `temperature_tracking.py`.
-  - `to_watts` knows only `kW` and `MW`, exact case. Do not casefold: `mW` and `MW` differ.
-  - The fleet object is dropped, with its departed anchors, when every entry unloads, so the
-    stagger anchor does not survive a reload of all entries at once. One entry's reload is fine.
-  - `diagnostics.py` `timers_armed` omits `_failsafe_warn_timer` and `_switch_unavailable_timer`;
-    `water_heater.py` ends with an empty `# --- Repairs ---` header, and `min_temp` / `max_temp`
-    each carry a second, dead docstring.
+  second reviewer trying to overturn each verdict. 4.6.5 fixed its two real behaviour bugs. 4.6.6
+  fixed the eight low ones (none seen on hardware yet), each with a test that fails without it:
+  - A surplus boost stops at exactly its target with cold tolerance 0 (the stop is tested first
+    while boosting; outside a boost the order is unchanged).
+  - Ready At follows a changed goal at once. The heater overrides `_async_write_ha_state` (the
+    method core names for it; `async_write_ha_state` is final) and sends `heat_rate_signal` when
+    `heating_goal()` differs from the last goal it announced. Every input of the goal is published,
+    so a change always comes with a write.
+  - Heat-up Rate's unit follows the unit system (`°F/h` on a Fahrenheit install).
+  - `set_temperature` honours `operation_mode` (see the Smart Eco section above).
+  - A tank state that is not a finite number is a missing reading everywhere (see "No reading, no
+    heat").
+  - `to_watts` reads every Home Assistant power unit at its own scale, plus `w`, `kw`, `KW`, `Kw`,
+    ignoring surrounding whitespace. Still no casefold: `mw` and `Mw` are not guessed, and a unit
+    nobody can interpret is still taken as watts.
+  - The fleet object is kept while it holds unexpired departed anchors (`HeaterFleet.holds_state`),
+    so a reload of every entry at once keeps the stagger.
+  - Diagnostics list every `*_timer` the heater holds, and a test compares the list with the
+    entity so it cannot fall behind again.
+
+  Found while fixing them, all older than this change, and open:
+  - **The integration is Celsius-only, and does not say so.** Readings arrive in the unit system's
+    unit and are compared with constants that are in Celsius, unconverted: the disinfection
+    thresholds in `sensor.py`, `DISINFECTION_GOAL_C`, the spike filter's 10, Element Fault's 50 and
+    5, Hot Water In Use's rates, the heat-rate bounds, and the config flow's default range
+    (15 to 80). Reproduced on a US-customary system: an hour at 61 F set
+    `last_disinfection_at` and Disinfection Due In read 10 days, a false "disinfected". Either
+    convert readings to Celsius where they meet those constants (the tracking helper delivers each
+    reading with its unit) or state the limit and refuse the legionella sensor on a non-metric
+    system. Not decided.
+  - **A restart with the element on and no reading does not enter the failsafe.** "No reading yet"
+    is deliberately not a lost reading (it cycled the relay at every options save), so the control
+    pass skips, and an element found on stays on until the sensor's state next changes; a sensor
+    that never reports again never changes. A bounded wait (no first reading within some minutes of
+    setup, then the failsafe) would close it.
+  - `believed_on` carried across a reload is not corrected when the switch is found off on the way
+    back, whatever `DepartedAnchor`'s docstring says: that heater's next switch-on is admitted
+    without a new anchor, so a sibling can follow it sooner than the stagger by the length of the
+    reload. True of a single entry's reload too.
+  - The Power (mirror) sensor raises `ValueError` in its state write when the meter's state is
+    `nan` (a `power` sensor may not hold a non-finite value). It keeps its last value; the error
+    is logged.
+  - A Heat-up Rate restored after the unit system was changed keeps its old number under the new
+    label until a few runs relearn it.
 
   Checked and wrong, so not to be re-derived: the short-run boost lockout being skipped after a
   restart (`_surplus_window_start` is always set before `_boost_heating_since` can be), and the

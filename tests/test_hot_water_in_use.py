@@ -370,6 +370,19 @@ async def test_a_stale_startup_reading_cannot_anchor_a_fall(monkeypatch):
     assert not sensor.is_on, "a four-hour-old reading was treated as current"
 
 
+def test_a_nan_startup_sample_does_not_hide_a_real_draw():
+    """The startup read parsed "nan" as a float and kept it as a sample.
+
+    Every slope measured against it is NaN, and NaN is above no threshold, so
+    a draw in the minutes after a restart went unseen until the sample aged out.
+    """
+    sensor = build()
+    sensor._async_add_sample("nan", at(-30))
+    feed(sensor, ramp(50.0, 46.0, 95, step=19))
+
+    assert sensor.is_on
+
+
 def test_an_out_of_order_sample_does_not_lose_a_real_fall():
     """The newest sample must stay newest, or the fall is silently dropped."""
     sensor = build()

@@ -89,7 +89,10 @@ class _HeaterSensor(SensorEntity):
 
 
 class HeatUpRateSensor(_HeaterSensor, RestoreSensor):
-    """How fast this tank warms while its element draws, in C per hour.
+    """How fast this tank warms while its element draws, in degrees per hour.
+
+    The rate is in whatever unit the tank sensor reports, which is the system
+    temperature unit, so the label follows it (C/h or F/h).
 
     The element counts as drawing when the meter reads at least DRAW_W, or,
     with no meter, when the switch is on: a closed relay behind a tank
@@ -97,7 +100,6 @@ class HeatUpRateSensor(_HeaterSensor, RestoreSensor):
     """
 
     KEY = "heat_up_rate"
-    _attr_native_unit_of_measurement = "°C/h"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:thermometer-chevron-up"
     _attr_suggested_display_precision = 1
@@ -108,6 +110,9 @@ class HeatUpRateSensor(_HeaterSensor, RestoreSensor):
     ) -> None:
         super().__init__(entry_id, name, "Heat-up Rate", self.KEY, device_identifiers, device_has_name)
         self.hass = hass
+        # The readings are not converted, so a Fahrenheit install learns F per
+        # hour; a fixed "C/h" label put the wrong unit on that number.
+        self._attr_native_unit_of_measurement = f"{hass.config.units.temperature_unit}/h"
         self._heater = heater_entity_id
         self._sensor = sensor_entity_id
         self._power = power_sensor

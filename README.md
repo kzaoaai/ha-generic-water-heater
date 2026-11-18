@@ -21,11 +21,15 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   neither count as a person nor restart the minimum on/off timers.
 - Always ON temporary override behavior for manual underlying switch changes, with an override state, an absolute resume time and persistent notifications.
 - Minimum on and off durations to avoid rapid switching.
+- `water_heater.set_temperature` also applies an `operation_mode` sent with it, exactly as
+  `water_heater.set_operation_mode` would. A mode the heater does not have is refused and nothing
+  changes; the mode the heater already reports changes nothing but the target.
 - One heater per switch: the config and options forms refuse a switch another entry already drives.
 - Fleet load coordination across every instance, so several heaters cannot step onto a shared inverter or generator at the same moment.
-- Failsafe shutdown when the temperature sensor becomes unavailable or unknown, in every heating
-  mode (including `performance` and a disinfection cycle) and without waiting for the minimum on
-  duration. The element stays off until the sensor reports a reading again.
+- Failsafe shutdown when the temperature sensor becomes unavailable or unknown, or reports anything
+  that is not a number (`nan` and `inf` included), in every heating mode (including `performance`
+  and a disinfection cycle) and without waiting for the minimum on duration. The element stays off
+  until the sensor reports a reading again.
 - Repairs (Settings > System > Repairs) when the temperature sensor or the heater switch has been
   unavailable for more than 10 minutes, or a disinfection cycle gives up. Each clears itself.
 - **Element Fault** (with a `power_sensor`): a problem sensor that turns on when the meter and the
@@ -33,9 +37,11 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
   below any thermostat cutout but drawing nothing (10 min). Read-only: it never switches anything.
   The `fault` attribute says which.
 - **Insights**, each switchable off in the options (saving reloads the heater, no restart):
-  - **Heat-up Rate** (C per hour), learned from the tank's own heating runs, and **Ready At**: when
-    the tank should reach what it is heading for (its target, the boost target while boosting, or
-    60 C in a disinfection cycle). Unknown while the element is not drawing.
+  - **Heat-up Rate** (degrees per hour, in Home Assistant's temperature unit), learned from the
+    tank's own heating runs, and **Ready At**: when the tank should reach what it is heading for
+    (its target, the boost target while boosting, or 60 C in a disinfection cycle). Unknown while
+    the element is not drawing. It follows a new target, a boost or a cycle at once, without
+    waiting for the next tank reading.
   - **Energy Today (Surplus / Utility / Other)** (with a `power_sensor`): today's element energy by
     what was carrying the house -- surplus active, else the utility, else anything else (battery,
     generator). An attribution from the Smart Eco inputs, not a measurement. Resets at midnight.
@@ -85,8 +91,8 @@ accepted with its original timestamp, and so is any reading not contradicted wit
 No tank changes that much between two reports, but some combined relay and temperature devices
 report one wild value as their relay switches. Before this filter, one such reading could switch
 the element, trigger Hot Water In Use, enter the 7-day maximum, or discard a disinfection hold that
-was nearly complete. `unavailable` and `unknown` are never delayed, so the failsafe still turns the
-element off at once.
+was nearly complete. `unavailable` and `unknown` are never delayed, and neither is a state that is
+not a number, which counts as unknown, so the failsafe still turns the element off at once.
 
 ## Installation
 
@@ -136,7 +142,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
-| `power_sensor` | entity_id | empty | Optional meter on the element's circuit. Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. |
 | `enable_element_fault` | boolean | `true` | The Element Fault sensor. Needs `power_sensor`. |
 | `enable_heat_up_rate` | boolean | `true` | The Heat-up Rate and Ready At sensors. |
 | `enable_energy_split` | boolean | `true` | The three Energy Today sensors. Needs `power_sensor`. |

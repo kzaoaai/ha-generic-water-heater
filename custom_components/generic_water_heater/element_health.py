@@ -63,10 +63,35 @@ def element_fault(
     return None
 
 
+# Home Assistant's own power units (UnitOfPower), spelled exactly, plus the
+# case variants that cannot mean anything else: no other prefix is "k", and
+# nothing but the watt is a bare "w". "mw" and "Mw" are left out on purpose:
+# milliwatt and megawatt differ by 1e9 and a guess would be wrong either way.
+# This module stays free of Home Assistant imports, so the table is spelled
+# out here rather than taken from its unit converter.
+_WATTS_PER_UNIT = {
+    "mW": 0.001,
+    "W": 1.0,
+    "w": 1.0,
+    "kW": 1000.0,
+    "kw": 1000.0,
+    "KW": 1000.0,
+    "Kw": 1000.0,
+    "MW": 1_000_000.0,
+    "GW": 1_000_000_000.0,
+    "TW": 1_000_000_000_000.0,
+    "BTU/h": 0.29307107,
+}
+
+
 def to_watts(value: float, unit: str | None) -> float:
-    """Normalise a power reading to watts."""
-    if unit == "kW":
-        return value * 1000.0
-    if unit == "MW":
-        return value * 1_000_000.0
-    return value
+    """Normalise a power reading to watts.
+
+    A unit nobody can interpret (including none) is taken as watts, as before:
+    the meter is read-only evidence, and refusing a verdict would need every
+    consumer to cope with a missing number. Surrounding whitespace is ignored,
+    since a stray space made kW read as W, a thousand-fold error.
+    """
+    if not isinstance(unit, str):
+        return value
+    return value * _WATTS_PER_UNIT.get(unit.strip(), 1.0)
