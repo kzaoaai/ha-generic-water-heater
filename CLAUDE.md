@@ -127,26 +127,49 @@ setup runs a control pass before it reads the sensor, and treating that as the f
 heating relay off and on at every options save (`test_setup_before_the_first_reading_does_not_cycle_the_relay`).
 
 "Not yet" is bounded, though (4.6.6). A heater that loads with no reading arms
-`_first_reading_timer`; if the sensor has still said nothing after `FIRST_READING_WITHIN` (2 min),
+`_first_reading_timer`; if the sensor has still said nothing after `FIRST_READING_WITHIN` (3 min),
 that is a lost reading like any other. Before, the control pass skipped for as long as the sensor's
 state did not change, so an element found on at a restart ran on the tank's thermostat alone, and a
 sensor that is gone never changes. On a Home Assistant start the wait begins at
 `async_at_started`, not at the heater's own load: the heater can load minutes before the sensor's
 integration, and counting from its load would stop the element on every slow start.
 
-What that costs and what it does not. A sensor that comes up later than 2 minutes after the start
+What that costs and what it does not. A sensor that comes up later than 3 minutes after the start
 now cycles an element that was on: off at the end of the wait, on again with the first reading.
 That is the price of the bound; the routine gap is about a minute. During the wait nothing starts
 heat: electric skips for want of a temperature, and `performance` skips too, since heat it started
 then would have no reading behind it and the wait would only have to stop it (a reviewer's repro:
-an element found off went on at load, then off two minutes later). The lost-reading clocks start
-when the wait ends, so a sensor that never speaks stops the element at about 2 minutes, logs the
-warning at about 4 and raises the repair at about 12, counted from the end of the start.
+an element found off went on at load, then off when the wait ended). The lost-reading clocks start
+when the wait ends, so a sensor that never speaks stops the element at about 3 minutes, logs the
+warning at about 5 and raises the repair at about 13, counted from the end of the start.
 
-The reading handler has no "ignore" branch. Until 2026-11-18 a value it could not parse made it
-return, and `nan` became the temperature, which no comparison can act on: either way an element
-that was on stayed on. Any new path that hands the heater a reading must end in a finite number or
-the failsafe, never in "leave it as it was".
+Inside the wait, what the sensor says short of a number is "not yet" too (4.6.7). The owner's rule:
+a restart must not operate a breaker without a good reason. `_awaiting_first_reading` is true from
+just before the heater subscribes to its sensor until the first reading arrives or the wait runs
+out, and while it is, `_async_sensor_changed` returns on a non-number without touching anything:
+no failsafe, no control pass, and the timer neither ended nor restarted. Before, such a word was a
+lost reading at once, but only if it reached the heater as a state change, which depended on whose
+integration loaded first. Seen on prod: on 2026-11-18 the tank sensor's entity appeared
+`unavailable` 21 s after its heater loaded and the failsafe was set; on 2026-11-16 the same sensor
+was already `unknown` when the heater loaded and nothing happened. Both times its first number came
+about 85 s after the heater loaded. With the element on, the first order was an off-and-on of the
+relay about a minute apart (read from the code; in 7 days of history no restart found that relay
+on). The flag is set before subscribing, not at the first read further down, because setup awaits
+in between. It is false on a bare object: only `async_added_to_hass` opens the allowance, and the
+same method registers what bounds it. On a reload that is the timer, armed at once. On a start it
+is `async_at_started`, so until Home Assistant has finished starting no timer runs yet and the
+bound is the start itself plus the wait: a really dead sensor and an element found on then cost
+the rest of the start and 3 minutes, where 4.6.6 stopped at the first word. That is the price of
+not operating the relay on a slow start, and Home Assistant bounds its own start.
+
+Outside that wait the reading handler has no "ignore" branch. Until 2026-11-18 a value it could not
+parse made it return, and `nan` became the temperature, which no comparison can act on: either way
+an element that was on stayed on. Any new path that hands the heater a reading must end in a finite
+number or the failsafe, never in "leave it as it was". The wait is the one exception, and it is one
+only because nothing but a reading or an unload can cancel what ends it. Once a reading has
+arrived, losing it is the failsafe at once, however soon after the load, and a heater that loads
+with a reading never has the allowance at all (a reviewer's mutant survived until
+`test_a_heater_that_loads_with_a_reading_during_a_start_waits_for_nothing`).
 
 ### `performance` never reports idle
 
@@ -200,11 +223,78 @@ use `finite()` themselves.
 
 ### A Home Assistant start is not the eco condition going false
 
-For `STARTUP_GRACE` (2 min) after `homeassistant_started` — not after entity load — a FALSE eco
-condition neither parks nor restores; the restored mode stands. A TRUE one is trusted at once.
+For `STARTUP_GRACE` (3 min since 4.6.7, the owner's choice; 2 before) after
+`homeassistant_started` — not after entity load — a FALSE eco condition neither parks nor
+restores; the restored mode stands. A TRUE one is trusted at once.
 Switch flips in that window are not manual intent. Only a real start gets the window: a
 config-entry reload has its sources loaded. Without this, every restart switched heating tanks off
 because the template's source entities did not exist yet.
+
+The boost's inputs are carried through the same window (4.6.7). The grace kept the mode, but the
+boost needs `_surplus_active`, and a surplus entity that is missing, unavailable or inside its own
+delay reads inactive: a tank above its normal target plus hot tolerance was "satisfied" at load, so
+the setup control pass switched the element off and the boost switched it on again when the entity
+read active. On prod the surplus sensor was `on` before the 2026-11-15 15:10 restart and `off` for
+60 s after it. The owner's rule is that a restart must not operate a breaker without a good reason.
+So a restore sets `_carried_surplus` from the published `surplus_active` and
+`_carried_forecast_poor` from `forecast_preheat_active`, and inside the grace (which a reload never
+has) `_surplus_for_boost()` and `_forecast_poor()` fall back on them. Each is dropped the first
+time its input speaks for itself: surplus when it is read active (`_refresh_eco_entities`; from
+then on an `off` is a real falling edge), the forecast when it is readable, whatever it says (at
+the restore, or `_async_forecast_changed`). A readable `off` from the surplus entity does not drop
+it, because that is exactly what a delayed sensor says. Only the readings are carried: the Boost
+switch, a lockout, a shed and the mode are restored and decide as always.
+
+**The carry keeps an element on; it never switches one on.** Both carried readings count only
+inside the grace and while the heater's switch reads `on` (`_carry_in_force`). It took three review
+rounds to get there. The first version counted the surplus whatever the relay did, on the argument
+that it restored thresholds and not a relay state, and two reviewers switched an off relay on with
+it: what is restored can be stale (a crash before the next 15-minute save, a power cut, hours of
+downtime), and so can a person's wall-switch off under a timed pause. The second gated the surplus
+and not the forecast, and a third reviewer switched an off relay on again: surplus read active,
+forecast still unreadable, a carried "poor" raising the target over a tank between the two
+(`test_a_carried_forecast_never_switches_an_element_on`). **Any new carried input must go through
+`_carry_in_force`.** A relay that is off the network counts as not on: Home Assistant drops a
+command to an unavailable entity, but an ON sent on a carried reading is not something to leave to
+that.
+
+The test is the relay as it reads now, not whether it was on when Home Assistant went down, and
+nothing drops a carry when the element goes off. So an element that comes on again inside the
+grace for another reason (normal heating after a draw, a person, a relay that was unavailable at
+load) is kept toward the boost target until the grace ends. A latch that dropped the carry at the
+first `off` was considered and rejected: relays replay states when they reconnect after a start
+(2026-10-02: on then off within 250 ms with no command), and a replayed `off` would drop the carry
+of an element that is running, which then cycles, the very thing this exists to prevent. The
+re-adoption costs a few minutes of heat and operates nothing. There is no age check on the restored
+state either: with the element-on rule a stale carry can only delay an off, and the heater's
+`last_updated` could not give an age anyway (a tank at a steady temperature writes nothing for an
+hour while Home Assistant runs).
+
+`surplus_active` must stay the live reading and never the carried one: it is what the next start
+restores, so a carry that published itself would be carried again by every restart inside it, and
+a crash loop would boost with no surplus at all (`test_a_carry_publishes_the_surplus_it_can_see`
+pins the attribute, `test_only_a_surplus_that_was_seen_is_carried` the restore). A state saved
+before 4.6.7 has no such key; there `surplus_boost_active` says the same thing, since a boost was
+then active only on a surplus that was read, so the restart that installs 4.6.7 is covered
+(`test_the_restart_that_installs_this_version_is_covered`). The fallback applies only when the key
+is absent, never when it is false. The forecast's carry can chain, because
+`forecast_preheat_active` is the effective value; that only raises the target of a boost whose
+surplus is real or itself carried once. `eco_gated` is false for a carried boost (below).
+
+Costs. An element that is on may heat toward the boost target on power that is no longer surplus
+from the restart until the grace ends, and the grace is counted from the end of the start, so a
+slow start adds its whole length. A second restart before the surplus entity has come back carries
+nothing and cycles the relay as before; one after it has been read active carries again,
+correctly. That holds for clean stops. A hard crash writes no restore data (it is saved at stop and
+every 15 minutes), so a loop of hard crashes restores the same stale `surplus_active` at every boot
+and keeps an element that stays on until the last boot's grace ends (a reviewer's replay: five
+boots 60 s apart, first off at 520 s); the boost target and the tank's thermostat bound it. A
+surplus entity that reads `on` for an instant and `off` again inside the grace ends the carry and,
+with the element on, starts the short-run lockout, as it would have before. A relay that reads
+`unknown` when the heater loads (an optimistic or MQTT switch before its first report) is not
+counted as on, so it is sent the OFF and cycles as before 4.6.7; `unavailable` is sent it too and
+Home Assistant drops it. Not commanding a relay that cannot be read during the grace would close
+that, and is not done.
 
 ### The integration's own switch traffic is never a person
 
@@ -268,7 +358,8 @@ of the eco condition must make `_eco_gated` false.** Boost-only heat is the one 
 other side: with the tank past its normal target plus hot tolerance, the boost's heat stops when
 surplus leaves, which is when a battery would have to carry it, so it reads true even with the
 policy off or paused. Inside the normal hysteresis band it reads false, because the element would
-stay on regardless. Renaming or removing either attribute
+stay on regardless. A boost carried through a start (4.6.7) reads false too: it runs whatever the
+surplus does until the surplus is read active again. Renaming or removing either attribute
 is a breaking change (bump major); publishing `""` instead of `None` for an unset meter would
 break it too.
 
@@ -512,6 +603,19 @@ the same pattern.
   of silence at 64+ C, hold stalled). The meter is credited only for the hold, never for control.
   A tank with no meter still stalls this way. 4.6.4 has been live on prod since the 2026-11-14
   restart; neither path yet seen completing a hold on hardware.
+- 4.6.6 has been live on prod since the restart of 2026-11-18 09:40 UTC, on Home Assistant
+  2026.11.2 (the tests still run on 2026.10.2). Both heaters came back as they were, parked by
+  Smart Eco, with their state, and the log has nothing from the integration. None of its fixes has
+  been seen on hardware yet. What to look for: a surplus boost on a tank with cold tolerance 0
+  stops at exactly the boost target and stays off; Ready At moves at once when the target changes
+  mid-run.
+  That restart never armed the first-reading wait. One tank's sensor entity did not exist when its
+  heater loaded, appeared `unavailable` 21 s later (a few seconds before Home Assistant finished
+  starting, so before the wait would have been armed), turned `unknown` 45 s after that and gave
+  its first number 20 s later, about a minute after the start finished. In 4.6.6 `unavailable`
+  arriving as a state change was a lost reading, so the failsafe was set at once and the first
+  number cleared it; the element was off, so no relay moved. 4.6.7 makes those words part of the
+  wait (see "No reading, no heat").
 - 4.6.5 has been live on prod since the restart of 2026-11-16 22:04 UTC. Both heaters came back
   with their state (one mid timed pause, its deadline kept) and publish `manual_performance_until`.
   Neither fix has been seen on hardware yet. What to look for: a wall-switch ON on a tank above
@@ -579,7 +683,19 @@ the same pattern.
     each reading with its unit) is the real fix: roughly 100 to 150 lines, plus a decision on the
     history a Fahrenheit install has already stored.
   - Fixed in 4.6.6 too: a restart with the element on and no reading now enters the failsafe after
-    `FIRST_READING_WITHIN` (see "No reading, no heat"). Not seen on hardware.
+    `FIRST_READING_WITHIN` (see "No reading, no heat"). Not seen on hardware. 4.6.7 widened the
+    wait to a sensor that says unavailable or unknown before its first reading.
+  - Fixed in 4.6.7: a restart during a surplus boost or a forecast pre-heat cycled the relay (found
+    by the review of 4.6.7's first change; see "A Home Assistant start is not the eco condition
+    going false"). Not seen on hardware.
+  - A source slower than `STARTUP_GRACE` after a start still parks an element that was on and
+    restores it when the source arrives, and a boost carried through the grace ends with it the
+    same way. `test_the_grace_is_bounded_and_eco_then_parks_the_tank` pins the park, so this is
+    the bound working as designed; on prod the sources are back about a minute into the 3.
+  - If `async_added_to_hass` raises after the first-reading timer is armed, the abort does not
+    cancel it (`async_will_remove_from_hass` is not called on an abort): it fires when the wait
+    ends and raises on `hass` being None. No relay is commanded. A reviewer's forced repro; whether the
+    other timers armed during setup share this was not checked.
   - Switching the legionella sensor off in the options while a cycle runs looks unhandled (read,
     not tested): the select and the sensor go, the heater restores the policy and the cycle, and
     nothing can complete it before the give-up bound.

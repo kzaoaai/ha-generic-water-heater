@@ -49,6 +49,7 @@ async def async_get_config_entry_diagnostics(
             "target_temperature": heater._target_temperature,
             "effective_target_temperature": heater._effective_target_temperature(),
             "temperature_lost": heater._temperature_lost,
+            "awaiting_first_reading": heater._awaiting_first_reading,
             "last_commanded_switch_state": heater._last_commanded_switch_state,
             "pending_switch_state": heater._pending_switch_state,
             "last_switch_change_time": heater._last_switch_change_time,
@@ -57,6 +58,10 @@ async def async_get_config_entry_diagnostics(
             "load_shed": heater._load_shed,
             "eco_condition_met": heater._eco_condition_met,
             "surplus_active": heater._surplus_active,
+            # The carry as held. It counts only while the element reads on.
+            "boost_surplus_carried": (
+                heater._startup_grace_active and heater._carried_surplus
+            ),
             "surplus_window_start": heater._surplus_window_start,
             "off_until_target_for_disinfection": heater._off_until_target_for_disinfection,
             "timers_armed": {

@@ -418,6 +418,11 @@ class GenericWaterHeater(
         # surplus arriving: see _handle_surplus_edge.
         self._boost_heating_since: datetime | None = None
         self._surplus_boost_locked_until: datetime | None = None
+        # What the boost's two inputs said when Home Assistant went down,
+        # trusted during the startup grace only (_surplus_for_boost,
+        # _forecast_poor), so a reload restores them and never uses them.
+        self._carried_surplus = False
+        self._carried_forecast_poor = False
         self._surplus_boost_lockout_timer = None
         self._runtime = runtime
         self._smart_eco_mode = runtime.get("smart_eco_mode", SMART_ECO_MODE_OFF)
@@ -444,6 +449,12 @@ class GenericWaterHeater(
         self._failsafe_warn_timer = None
         # Armed when the heater loads with no reading (FIRST_READING_WITHIN).
         self._first_reading_timer = None
+        # True from the moment the heater listens to its sensor until the first
+        # reading arrives or the wait for it runs out. While it is, a sensor
+        # that says unavailable or unknown is still coming up, not lost
+        # (_async_sensor_changed). False on a bare object, so that nothing but
+        # async_added_to_hass, which also bounds it, can open the allowance.
+        self._awaiting_first_reading = False
         self._failsafe_warned = False
         self._switch_unavailable_timer = None
         self._operation_list = [
@@ -602,6 +613,11 @@ class GenericWaterHeater(
             RUNTIME_USE_UTILITY: self._use_utility(),
             RUNTIME_BOOST_ENABLED: self._surplus_boost_enabled(),
             "surplus_boost_active": self._surplus_boost_active(),
+            # The surplus entity as read right now, never the carried value: a
+            # start restores this to carry a boost through its grace, and a
+            # carry that published itself here would be carried again by every
+            # restart inside it, boosting on no surplus at all in a crash loop.
+            "surplus_active": self._surplus_active,
             "surplus_boost_target": self._surplus_boost_target,
             "forecast_preheat_active": self._forecast_poor(),
             "surplus_boost_locked_until": (
@@ -879,6 +895,10 @@ class GenericWaterHeater(
         )
         self.async_on_remove(self._async_fleet_unregister)
 
+        # Before listening, not where the sensor is first read further down:
+        # setup awaits in between, and a word arriving in that gap comes from a
+        # sensor this heater has not even looked at yet.
+        self._awaiting_first_reading = True
         self.async_on_remove(
             async_track_filtered_temperature(
                 self.hass, self.sensor_entity_id, self._async_sensor_changed
@@ -1069,6 +1089,27 @@ class GenericWaterHeater(
                     self._async_surplus_boost_lockout_ended,
                 )
 
+            # What the boost's inputs said when the heater went down. They
+            # count only inside the startup grace (_surplus_for_boost), which
+            # a reload never has, so nothing here asks which of the two this
+            # is. A forecast that can be read already is believed instead.
+            # A state saved before 4.6.7 has no surplus_active. There a
+            # boost was active only on a surplus that was read, so its flag
+            # says the same thing, and the restart that installs 4.6.7 is
+            # covered too. From 4.6.7 on the key is always there, and the
+            # flag is never consulted: a carry sets it as well.
+            self._carried_surplus = (
+                old_state.attributes.get(
+                    "surplus_active", old_state.attributes.get("surplus_boost_active")
+                )
+                is True
+            )
+            self._carried_forecast_poor = (
+                old_state.attributes.get("forecast_preheat_active") is True
+                and self._forecast_preheat is not None
+                and self._forecast_kwh() is None
+            )
+
         # The policy select restores from its own history too, and since
         # 2026.x the platforms set up in either order. If we had nothing of our
         # own, take what the select already restored; if it has not run yet,
@@ -1117,6 +1158,8 @@ class GenericWaterHeater(
             self.async_on_remove(
                 async_at_started(self.hass, self._async_begin_first_reading_wait)
             )
+        else:
+            self._end_first_reading_wait()
 
         heater_switch = self.hass.states.get(self.heater_entity_id)
         if heater_switch and heater_switch.state not in (

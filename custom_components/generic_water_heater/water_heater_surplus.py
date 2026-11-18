@@ -36,23 +36,32 @@ class SurplusBoostMixin:
             self._surplus_boost_target is not None or self._forecast_preheat is not None
         )
 
+    def _forecast_kwh(self) -> float | None:
+        """Tomorrow's forecast in kWh, or None while it cannot be read."""
+        state = self.hass.states.get(self._forecast_preheat["entity"])
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return None
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return None
+        unit = (state.attributes.get("unit_of_measurement") or "kWh").strip()
+        return value / 1000 if unit == "Wh" else value * 1000 if unit == "MWh" else value
+
     def _forecast_poor(self) -> bool:
         """Whether tomorrow's solar forecast is below the pre-heat threshold.
 
         An unreadable forecast is not a poor one: pre-heat stores extra heat
-        on a guess, so without the forecast it does nothing.
+        on a guess, so without the forecast it does nothing. The one exception
+        is a carry through a start (_carry_in_force): a forecast that was poor
+        when Home Assistant went down and has not been readable since still
+        counts, while the element it was heating is still on.
         """
         if self._forecast_preheat is None:
             return False
-        state = self.hass.states.get(self._forecast_preheat["entity"])
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return False
-        try:
-            value = float(state.state)
-        except (TypeError, ValueError):
-            return False
-        unit = (state.attributes.get("unit_of_measurement") or "kWh").strip()
-        kwh = value / 1000 if unit == "Wh" else value * 1000 if unit == "MWh" else value
+        kwh = self._forecast_kwh()
+        if kwh is None:
+            return self._carried_forecast_poor and self._carry_in_force()
         return kwh < self._forecast_preheat["min_kwh"]
 
     def _boost_target_now(self) -> float | None:
@@ -63,6 +72,9 @@ class SurplusBoostMixin:
         return max(targets) if targets else None
 
     async def _async_forecast_changed(self, _event) -> None:
+        if self._forecast_kwh() is not None:
+            # Read again: from here it speaks for itself, also if it drops out.
+            self._carried_forecast_poor = False
         await self._async_control_heating()
         self.async_write_ha_state()
 
@@ -71,6 +83,48 @@ class SurplusBoostMixin:
             self._surplus_boost_locked_until is not None
             and dt_util.utcnow() < self._surplus_boost_locked_until
         )
+
+    def _surplus_for_boost(self) -> bool:
+        """Surplus as the boost sees it: read now, or carried through a start.
+
+        A restart must not operate the relay without a good reason. At a start
+        the surplus entity is missing, unavailable or still inside its own
+        delay, all of which read inactive, so a tank being boosted above its
+        normal target was "satisfied" when the heater loaded: the element went
+        off, and on again when the entity came back a minute later. The
+        startup grace already says a false eco condition cannot be judged yet;
+        this is the same allowance for the boost. Surplus that was active when
+        Home Assistant went down still counts until the entity has been seen
+        active again (from then on its off is a real one) or the grace ends.
+        Only the reading is carried: the Boost switch, a lockout, a shed and
+        the mode decide as they always do.
+
+        And it counts only while the element reads on (_carry_in_force).
+        """
+        return self._surplus_active or (
+            self._carried_surplus and self._carry_in_force()
+        )
+
+    def _carry_in_force(self) -> bool:
+        """Whether what a start carried may be used: in the grace, element on.
+
+        One rule for both carried readings, the surplus and the forecast. A
+        carry exists to keep a running element running; it must never switch
+        one on. What was saved can be stale (a crash, a power cut, hours of
+        downtime), and a relay found off and switched on by a reading nobody
+        has taken since is a restart operating a breaker in the worse
+        direction. The surplus was gated this way first and the forecast was
+        not: with the surplus read active and the forecast still unreadable,
+        a carried "poor" raised the target and switched an off element on.
+        The test is the relay as it reads now, not whether it was on when
+        Home Assistant went down, so an element switched on by something else
+        inside the grace is kept toward the boost target until the grace ends.
+        """
+        return self._startup_grace_active and self._element_reads_on()
+
+    def _element_reads_on(self) -> bool:
+        heater = self.hass.states.get(self.heater_entity_id)
+        return heater is not None and heater.state == STATE_ON
 
     def _surplus_boost_active(self) -> bool:
         """Whether control is aiming at the boost target right now.
@@ -82,7 +136,7 @@ class SurplusBoostMixin:
         return (
             self._surplus_boost_configured()
             and self._surplus_boost_enabled()
-            and self._surplus_active
+            and self._surplus_for_boost()
             and self._target_temperature is not None
             and (boost := self._boost_target_now()) is not None
             and boost > self._target_temperature
@@ -124,10 +178,7 @@ class SurplusBoostMixin:
         stopped before the surplus left reads False: it did not cause the
         surplus to leave.
         """
-        if not self._surplus_boost_active():
-            return False
-        heater = self.hass.states.get(self.heater_entity_id)
-        return heater is not None and heater.state == STATE_ON
+        return self._surplus_boost_active() and self._element_reads_on()
 
     def _handle_surplus_edge(self, boost_was_heating: bool) -> None:
         """Open a surplus window, or close one and lock out a short boost."""

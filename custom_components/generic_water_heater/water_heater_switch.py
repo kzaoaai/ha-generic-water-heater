@@ -168,11 +168,7 @@ class SwitchControlMixin:
     @callback
     def _async_begin_first_reading_wait(self, _hass) -> None:
         """Start the clock on a heater that loaded with no reading."""
-        if (
-            self._current_temperature is not None
-            or self._temperature_lost
-            or self._first_reading_timer is not None
-        ):
+        if not self._awaiting_first_reading or self._first_reading_timer is not None:
             return
         self._first_reading_timer = async_call_later(
             self.hass,
@@ -182,6 +178,7 @@ class SwitchControlMixin:
 
     @callback
     def _end_first_reading_wait(self) -> None:
+        self._awaiting_first_reading = False
         if self._first_reading_timer is not None:
             self._first_reading_timer()
             self._first_reading_timer = None
@@ -189,15 +186,18 @@ class SwitchControlMixin:
     async def _async_first_reading_overdue(self, _now) -> None:
         """Still no reading since the heater loaded: by now that is a lost one."""
         self._first_reading_timer = None
-        # Belt and braces, not covered: any word from the sensor cancels this
-        # timer before it can fire (_async_sensor_changed).
-        if self._current_temperature is not None or self._temperature_lost:
+        # Belt and braces, not covered: the first reading cancels this timer
+        # before it can fire (_end_first_reading_wait).
+        if not self._awaiting_first_reading:
             return
         _LOGGER.debug(
             "%s: no first reading within %d s of loading, treating it as lost",
             self.name,
             FIRST_READING_WITHIN.total_seconds(),
         )
+        # The wait is over, so this word is not "still coming up": it is the
+        # failsafe (_async_sensor_changed ends the wait before it reads it).
+        self._awaiting_first_reading = False
         await self._async_sensor_changed(STATE_UNKNOWN, dt_util.utcnow(), {})
 
     @callback
@@ -220,14 +220,30 @@ class SwitchControlMixin:
 
     async def _async_sensor_changed(self, value, _when, _attributes):
         """Handle a temperature reading that survived the spike filter."""
-        # The sensor has spoken, with a reading or without one: the wait for
-        # its first word is over either way.
-        self._end_first_reading_wait()
         # Anything that is not a finite number is a missing reading. The
         # tracking helper already delivers such states as unknown; this does
         # not rely on it, because the other answer to a value it cannot use
         # was to return and leave the element as it was.
         reading = finite(value)
+        if reading is None and self._awaiting_first_reading:
+            # Still "not yet" (FIRST_READING_WITHIN), not the failsafe. A
+            # sensor that has given this heater no reading since it loaded and
+            # now says unavailable or unknown is coming up, not failing: on a
+            # start its entity appears unavailable, turns unknown once its
+            # device answers, and only then has a number. Taking those words as
+            # a lost reading depended on whose integration loaded first (they
+            # reach this method only as changes), so the same restart either
+            # waited or switched a heating element off and, a minute later, on
+            # again. The wait bounds this exactly as it bounds silence: its
+            # timer is neither ended nor restarted here, and when it runs out
+            # the reading is lost. Nothing has changed, so no control pass.
+            self._debug_log(
+                "sensor has no reading yet (%s): still waiting for the first one",
+                value,
+            )
+            return
+        # The first reading, or the end of the wait for it.
+        self._end_first_reading_wait()
         if reading is None:
             # Failsafe. The control pass at the end of this method switches
             # the element off and holds it off for as long as the reading is

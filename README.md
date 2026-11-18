@@ -29,8 +29,10 @@ The `Generic Water Heater` integration creates a virtual water heater entity in 
 - Failsafe shutdown when the temperature sensor becomes unavailable or unknown, or reports anything
   that is not a number (`nan` and `inf` included), in every heating mode (including `performance`
   and a disinfection cycle) and without waiting for the minimum on duration. The element stays off
-  until the sensor reports a reading again. A heater that loads with no reading waits 2 minutes for
+  until the sensor reports a reading again. A heater that loads with no reading waits 3 minutes for
   the first one (counted from the end of Home Assistant's start, on a start), then does the same.
+  A sensor that says unavailable or unknown before it has given that first reading is still coming
+  up, not lost, so a restart does not switch a heating element off and on while the sensor loads.
 - Repairs (Settings > System > Repairs) when the temperature sensor or the heater switch has been
   unavailable for more than 10 minutes, or a disinfection cycle gives up. Each clears itself.
 - **Element Fault** (with a `power_sensor`): a problem sensor that turns on when the meter and the
@@ -158,12 +160,12 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
-| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). Not used for control: published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. A boost kept through a Home Assistant start (see "After a Home Assistant restart") reads `false` until the surplus entity is active again: it does not stop when the surplus leaves. |
 | `enable_element_fault` | boolean | `true` | The Element Fault sensor. Needs `power_sensor`. |
 | `enable_heat_up_rate` | boolean | `true` | The Heat-up Rate and Ready At sensors. |
 | `enable_energy_split` | boolean | `true` | The three Energy Today sensors. Needs `power_sensor`. |
 | `enable_forecast_preheat` | boolean | `false` | Forecast pre-heat. Needs `surplus_entity` and the three below. |
-| `forecast_entity` | entity_id | empty | Tomorrow's expected solar production, in kWh (Wh and MWh are converted). Forecast.Solar's "Estimated energy production - tomorrow" is one. Unreadable means no pre-heat. |
+| `forecast_entity` | entity_id | empty | Tomorrow's expected solar production, in kWh (Wh and MWh are converted). Forecast.Solar's "Estimated energy production - tomorrow" is one. Unreadable means no pre-heat, except for an element that is already on in the first minutes after a Home Assistant start (see "After a Home Assistant restart"). |
 | `forecast_min_kwh` | number | empty | Below this, tomorrow counts as poor. |
 | `forecast_preheat_target_temperature` | number | empty | The boost target on the day before a poor one, when higher than `surplus_boost_target_temperature`. With a boost target of 61, a pre-heat target of 61 changes nothing: either lower the everyday boost target or raise this. |
 
@@ -299,7 +301,10 @@ With a boost target set and **Boost: Use PV Excess** on, a tank in `electric` he
 boost target instead of its normal one while the surplus entity is active. The published target
 temperature stays the person's own; `surplus_boost_active` and `surplus_boost_target` report the
 boost. When surplus leaves, the tank goes back to its normal target, so heat above that target is
-only ever drawn from surplus: on the utility or a battery the tank stops at its normal target.
+drawn from surplus: on the utility or a battery the tank stops at its normal target. The one
+exception is the first minutes after a restart, when a boost that was already running is kept
+without a surplus reading: see "After a Home Assistant restart". The heater also publishes
+`surplus_active`, the surplus entity as it reads it, so the two can be told apart.
 
 The boost stops at exactly its target: the hot tolerance is not added on top, so the number set is
 the peak. The cold tolerance still decides when it starts again. The boost target is not limited by
@@ -342,22 +347,52 @@ heating is blocked even if the target would otherwise ask for heat.
 At startup the eco inputs (the surplus and utility entities, or the template's sources) may not
 have loaded yet, and a sensor with a delay
 reads a plausible `off` until the delay passes. Such a condition can't be evaluated yet; it isn't
-false. So for 2 minutes after Home Assistant finishes starting, a **false** condition doesn't park
+false. So for 3 minutes after Home Assistant finishes starting, a **false** condition doesn't park
 the tank. The heater keeps the mode it had before the restart and controls to target as before,
 with Smart Eco State reading `Starting up`. A **true** condition is acted on at once. When the
 window ends, the condition is enforced as usual. The window is time-bounded, so a source that never
 comes back can't keep eco bypassed.
+
+A surplus boost that was running when Home Assistant went down is kept through the same window
+(4.6.7). The surplus entity reads inactive while it is missing, unavailable or inside its own
+delay, which used to end the boost at load: a tank above its normal target had its element switched
+off and, when the entity came back about a minute later, on again. Surplus that was active before
+the restart now still counts, for as long as the element is on, until the entity has been seen
+active again (after which its `off` is a real one) or until the window ends. A forecast that was
+poor is kept the same way until the forecast can be read again. Both are used only while the
+element reads on: they keep a running element running and never switch one on, so a relay found
+off stays off until surplus is actually read. Only those two readings are carried: the **Boost**
+switch, a lockout, a load shed and the mode decide as usual, and nothing is carried on a reload.
+
+What this costs:
+
+- From the restart until 3 minutes after Home Assistant has finished starting, an element that is
+  on may heat toward the boost target on power that is no longer surplus. That includes an element
+  switched on by something else in that time, such as normal heating after a draw.
+- A second restart before the surplus entity has come back switches the element off as before:
+  what is restored is the surplus as it was last read, and by then that is `off`. That is also what
+  stops a loop of restarts from boosting on no surplus. A loop of hard crashes is the exception:
+  Home Assistant saves restore data at a clean stop and every 15 minutes, so each crash restores
+  the same older save, and an element that stays on is kept until the last start's window ends.
+- A relay whose state cannot be read when the heater loads is not counted as running. One that
+  reads `unknown` is sent the OFF it would have been sent before this version; one that is
+  `unavailable` is sent it too, and Home Assistant drops it.
 
 In the same window, switch changes are not taken as a person acting on the switch. Devices
 reconnecting after a restart can replay states, and one replayed `on` used to start a manual eco
 pause. The control loop puts the switch back where it should be. A config-entry reload while Home
 Assistant is running gets no window, because its sources are already loaded.
 
-The tank sensor gets the same 2 minutes to give its first reading. Until it does, no heat is
-started, in `performance` either, and an element that was already on is left on. If the 2 minutes
-pass with no reading, the failsafe switches the element off; the first reading brings heating back.
-A sensor that takes longer than that to come up after a start therefore costs one off-and-on of
-the relay.
+The tank sensor gets the same 3 minutes to give its first reading. Until it does, no heat is
+started, in `performance` either, and an element that was already on is left on. Whatever the
+sensor says in that time short of a number (`unavailable` while its integration loads, `unknown`
+once its device answers) is part of the wait, not a lost reading. Before 4.6.7 it was a lost
+reading whenever the sensor's integration happened to load after the heater, and a restart in the
+middle of a heating run then switched the element off and, about a minute later, on again. If the
+3 minutes pass with no reading, the failsafe switches the element off; the first reading brings
+heating back. A sensor that takes longer than that to come up after a start therefore costs one
+off-and-on of the relay. Once the sensor has given a reading, losing it is the failsafe at once,
+as always.
 
 ### Heat now, without leaving the policy off
 

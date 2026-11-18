@@ -17,7 +17,12 @@ _LOGGER = logging.getLogger(f"{__package__}.water_heater")
 # 2026-10-02 a PV-excess sensor took ~70 s after load to report its real value.
 # A condition that cannot be evaluated is not a condition that is false. The
 # window is bounded so a template whose source never returns cannot bypass eco.
-STARTUP_GRACE = timedelta(minutes=2)
+# The boost's inputs get the same window (4.6.7): surplus and a poor forecast
+# that held when Home Assistant went down are carried through it.
+# 3 minutes since 4.6.7 (the owner's choice; it was 2): the surplus sensor and
+# the slower tank sensor of the real install both come back about a minute
+# after the start, and a window they miss operates a relay for nothing.
+STARTUP_GRACE = timedelta(minutes=3)
 
 # How long a switch command of ours may take to be reported back. A cloud relay
 # reported an OFF 11 s after it was sent on 2026-10-02; this leaves headroom
@@ -61,8 +66,12 @@ FAILSAFE_WARN_AFTER = timedelta(minutes=2)
 # later needs a moment (about a minute on a real install). But it stayed "not
 # yet" for ever: an element found on at a restart ran on the tank's own
 # thermostat alone until the sensor's state next changed, and the state of a
-# sensor that is gone never changes.
-FIRST_READING_WITHIN = timedelta(minutes=2)
+# sensor that is gone never changes. Until the first reading, a sensor that
+# says unavailable or unknown is inside this wait too (4.6.7): that is how a
+# sensor comes up after a start, and taking it as a lost reading cycled a
+# heating relay at a restart. The same length as STARTUP_GRACE, for the same
+# reason.
+FIRST_READING_WITHIN = timedelta(minutes=3)
 # How long the heater switch may be unavailable before the heater itself shows
 # unavailable. The relays here drop off the network for seconds at a time, many
 # times a week (7 days on a real install: 10 drops, none over a minute), and

@@ -369,6 +369,30 @@ async def test_the_forecast_turning_poor_starts_it(hass, world):
     assert switch_on(hass)
 
 
+@pytest.mark.parametrize(
+    ("state", "unit", "poor"),
+    [
+        ("0.0125", "MWh", True),   # 12.5 kWh
+        ("0.0351", "MWh", False),  # 35.1 kWh
+        ("12.5", " kWh ", True),
+        ("12500", " Wh", True),
+        ("12.5", None, True),      # no unit: taken as kWh
+        ("0", "kWh", True),        # nothing at all tomorrow is the poorest forecast, not no forecast
+    ],
+)
+async def test_the_forecast_is_read_in_its_own_unit(hass, world, state, unit, poor):
+    """The threshold is 20 kWh whatever the forecast entity reports in."""
+    await preheating(hass, 35.1)
+    assert not switch_on(hass), "test premise"
+
+    attributes = {} if unit is None else {"unit_of_measurement": unit}
+    hass.states.async_set(FORECAST, state, attributes)
+    await hass.async_block_till_done()
+
+    assert heater(hass).attributes["forecast_preheat_active"] is poor
+    assert switch_on(hass) is poor
+
+
 async def test_the_boost_switch_turns_pre_heat_off_too(hass, world):
     await preheating(hass, 12.5)
     await hass.services.async_call("switch", "turn_off", {"entity_id": BOOST}, blocking=True)

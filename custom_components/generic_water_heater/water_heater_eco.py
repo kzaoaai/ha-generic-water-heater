@@ -44,9 +44,13 @@ class SmartEcoMixin:
         # Heat that exists only because of the boost: the tank is past where
         # its normal target would stop it, so it stops when surplus leaves -
         # which is when the pack would have to carry it. That holds even with
-        # the policy off or paused, which is the only case this adds.
+        # the policy off or paused, which is the only case this adds. It does
+        # not hold for a boost carried through a start (_surplus_for_boost):
+        # that one runs whatever the surplus does, so it needs a surplus that
+        # is actually read.
         boost_gated = (
             self._surplus_boost_active()
+            and self._surplus_active
             and self._current_temperature is not None
             and self._current_temperature
             >= self._target_temperature + self._hot_tolerance
@@ -184,6 +188,9 @@ class SmartEcoMixin:
         boost_was_heating = self._surplus_boost_heating_now()
         was_surplus = self._surplus_active
         self._surplus_active = self._entity_active(self._surplus_entity, self._surplus_state)
+        if self._surplus_active:
+            # Seen again: nothing is carried any more (_surplus_for_boost).
+            self._carried_surplus = False
         self._utility_active = self._entity_active(self._utility_entity, self._utility_state)
         if self._surplus_active != was_surplus:
             self._handle_surplus_edge(boost_was_heating)
