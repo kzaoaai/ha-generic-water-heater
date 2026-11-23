@@ -788,10 +788,14 @@ the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py`, `element_heal
 
 ## Open items
 
-- **Surplus fit (4.7.0, written 2026-11-23): not released, not on the install.** In the working
-  tree with `manifest.json` at 4.7.0; 841 tests pass. It does nothing until `surplus_power_entity`
-  is set on each heater, which on the owner's install waits for the inverter integration's
-  `PV Surplus Power` sensor (its 0.3.33, also unreleased). To see on hardware once both are live
+- **Surplus fit (4.7.0, written 2026-11-23): released, installed, not yet loaded.** Released as
+  v4.7.0 on 2026-11-23 and installed on the owner's install the same day (every file checked
+  against the release); it loads at the next Home Assistant restart, which is the owner's to do.
+  841 tests pass. A read of the release notes against the code before publishing corrected one
+  README sentence (what happens while the sensor has no reading). It does nothing until
+  `surplus_power_entity` is set on each heater, which on the owner's install waits for the
+  inverter integration's `PV Surplus Power` sensor (its 0.3.33, installed there the same day
+  and waiting for the same restart). To see on hardware once both are live
   and configured: on a surplus one heater starts, the second a minute or more later and only if
   the reading allows; `fleet_hold_reason` and `Waiting for more surplus` on the one waiting;
   `element_draw_w` near 1850 and 1200 after each has run once; on a shortfall one relay
