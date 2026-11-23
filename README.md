@@ -246,9 +246,10 @@ Set `surplus_power_entity` and heat that depends on the surplus has to fit it:
 What the fit never touches: heat a person asked for with the ON button, heat the utility or the
 template also allows, a tank the plain thermostat heats with Smart Eco off, a load shed, and the
 failsafes. (`performance` chosen under an enforcing policy is still heat the eco gate would stop,
-so it is sized like any other.) With no reading from the sensor the heaters behave as if it were
-not configured. With a `min_on_duration`, a heater told to stop may stay on until that time is up;
-nothing else is told to stop for the load it still is.
+so it is sized like any other.) While the sensor has no reading, no heater is refused for want of
+fit and none is stopped for a shortfall; starts on the surplus are still taken one at a time, 60 s
+apart, the closest tank first. With a `min_on_duration`, a heater told to stop may stay on until
+that time is up; nothing else is told to stop for the load it still is.
 
 ### Power balancing is deliberately not done here (changed in 2.0.0)
 
