@@ -73,6 +73,12 @@ async def async_get_config_entry_diagnostics(
                 heater._startup_grace_active and heater._carried_surplus
             ),
             "surplus_window_start": heater._surplus_window_start,
+            # Surplus fit (4.7.0): the power sensor as read now, whether this
+            # heater's heat would stop with the surplus, and why a lockout runs.
+            "surplus_power_entity": heater._surplus_power_entity,
+            "surplus_reading": asdict(heater._read_surplus_power()),
+            "heat_depends_on_surplus": heater._heat_depends_on_surplus(),
+            "surplus_lock_reason": heater._surplus_lock_reason,
             "off_until_target_for_disinfection": heater._off_until_target_for_disinfection,
             "timers_armed": {
                 name: getattr(heater, name) is not None
@@ -87,6 +93,7 @@ async def async_get_config_entry_diagnostics(
                     "_switch_unavailable_timer",
                     "_manual_performance_timer",
                     "_stale_reading_timer",
+                    "_surplus_fit_timer",
                 )
             },
             "attributes": heater.extra_state_attributes,
@@ -104,6 +111,7 @@ async def async_get_config_entry_diagnostics(
             "fleet": {
                 "stagger_seconds": fleet.stagger_seconds,
                 "member": asdict(member) if member is not None else None,
+                "surplus": fleet.surplus_snapshot(),
             },
             "runtime": {
                 key: value

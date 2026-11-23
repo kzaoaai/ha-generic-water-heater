@@ -35,6 +35,7 @@
             "data": {
               "surplus_entity": "Surplus entity",
               "surplus_state": "Surplus active state",
+              "surplus_power_entity": "Surplus power sensor (optional)",
               "utility_entity": "Utility entity",
               "utility_state": "Utility active state",
               "eco_mode_template_condition": "Extra condition (template, optional)",
@@ -43,6 +44,7 @@
             "data_description": {
               "surplus_entity": "An entity that says there is spare power to use, for example a PV-excess binary sensor. While it is active, heating is allowed, and the surplus boost (below) may heat past the normal target.",
               "surplus_state": "The state that means 'active'. 'on' for a binary sensor; for an enum sensor, the state to match. Compared ignoring case.",
+              "surplus_power_entity": "How much the surplus can still carry, in W or kW, negative when it is short. With it, heaters that heat only on the surplus start one at a time, the tank closest to its goal first (so one tank gets hot before two get warm), and only if the heater's draw fits; when the surplus runs short the last one started stops first and the others carry on. A 'curtailed' attribute on the sensor means more is available than the number says. Leave empty to let the surplus entity alone decide.",
               "utility_entity": "An entity that says the utility supply is carrying the house. While it is active and the heater's 'Eco: Use Utility' switch is on, heating is allowed up to the normal target.",
               "utility_state": "The state that means 'active', for example 'on', or 'Utility' for a power-source sensor. Compared ignoring case.",
               "eco_mode_template_condition": "Optional. A boolean template that also allows heating when true, OR'd with the two entities above. Leave empty when the entities say everything. Smart Eco policy itself is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
@@ -151,6 +153,7 @@
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
       "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "surplus_power_needs_surplus_entity": "A surplus power sensor needs a surplus entity: it only sizes heat the surplus entity allows.",
       "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay.",
       "forecast_preheat_incomplete": "Forecast pre-heat needs a forecast sensor, a threshold and a pre-heat target."
     }
@@ -191,6 +194,7 @@
             "data": {
               "surplus_entity": "Surplus entity",
               "surplus_state": "Surplus active state",
+              "surplus_power_entity": "Surplus power sensor (optional)",
               "utility_entity": "Utility entity",
               "utility_state": "Utility active state",
               "eco_mode_template_condition": "Extra condition (template, optional)",
@@ -199,6 +203,7 @@
             "data_description": {
               "surplus_entity": "An entity that says there is spare power to use, for example a PV-excess binary sensor. While it is active, heating is allowed, and the surplus boost (below) may heat past the normal target.",
               "surplus_state": "The state that means 'active'. 'on' for a binary sensor; for an enum sensor, the state to match. Compared ignoring case.",
+              "surplus_power_entity": "How much the surplus can still carry, in W or kW, negative when it is short. With it, heaters that heat only on the surplus start one at a time, the tank closest to its goal first (so one tank gets hot before two get warm), and only if the heater's draw fits; when the surplus runs short the last one started stops first and the others carry on. A 'curtailed' attribute on the sensor means more is available than the number says. Leave empty to let the surplus entity alone decide.",
               "utility_entity": "An entity that says the utility supply is carrying the house. While it is active and the heater's 'Eco: Use Utility' switch is on, heating is allowed up to the normal target.",
               "utility_state": "The state that means 'active', for example 'on', or 'Utility' for a power-source sensor. Compared ignoring case.",
               "eco_mode_template_condition": "Optional. A boolean template that also allows heating when true, OR'd with the two entities above. Leave empty when the entities say everything. Smart Eco policy itself is controlled by a select entity with modes Off, Off until target reached, On until next manual control, Auto Resume after Delay, and Always ON.",
@@ -307,6 +312,7 @@
     "error": {
       "power_sensor_is_mirror": "That sensor is a water heater's own Power (mirror) copy. Choose the meter itself.",
       "surplus_boost_needs_surplus_entity": "A boost target needs a surplus entity to boost on.",
+      "surplus_power_needs_surplus_entity": "A surplus power sensor needs a surplus entity: it only sizes heat the surplus entity allows.",
       "heater_already_configured": "Another Generic Water Heater already drives this switch. Two heaters on one switch fight over the relay.",
       "forecast_preheat_incomplete": "Forecast pre-heat needs a forecast sensor, a threshold and a pre-heat target."
     }

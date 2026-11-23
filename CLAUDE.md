@@ -277,6 +277,13 @@ inverter in the same event-loop pass. Nameplate-watt admission was removed in 2.
 load balancer owns that, and two systems balancing one supply from two sets of nameplates disagree
 silently. The supported seam is the `shed` / `release` services.
 
+**The surplus fit (4.7.0) is not an exception to this, and must not become one.** It decides one
+question the balancer has no opinion on: which tank gets power that is otherwise thrown away. It
+holds no budget and no sum of nameplates, never looks at the supply's capacity, and can only delay
+or take back heat that exists because a surplus was announced. If a change to it would stop heat a
+person, the utility, a template or the plain thermostat asked for, or would protect the inverter,
+it belongs in the balancer. See "Surplus heat has to fit the surplus".
+
 Three invariants in `fleet.py` look like leftovers of the removed budget and are not. The 2.0.0
 first pass deleted them and an adversarial review caught it:
 
@@ -430,7 +437,9 @@ the hold progress changes. History stored before 4.6.1 (raw samples) is read int
 ### `power_sensor` and `eco_gated` are a contract with another integration
 
 `power_sensor` is the configured meter on the element's circuit (or `None`), published, and
-never read to start heat or to balance anything. Two read-only diagnostics read it as evidence:
+never read live to start heat or to balance anything. (Since 4.7.0 it teaches the element's draw,
+`element_draw_w`: a number remembered from past runs, which the surplus fit compares with the spare
+power. The live reading still decides nothing about starting.) Two read-only diagnostics read it as evidence:
 Element Fault, and since 4.6.4 the disinfection hold's element-off check. Since 4.6.8 one control
 path reads it too, stop-only: `_heated_now` counts a draw as evidence that the tank is being
 heated, for the stale-reading failsafe, and the only thing that can follow is the element being
@@ -522,6 +531,78 @@ the lockout is set and matters when the utility later leaves
 its own event. The restart that installs 4.6.8 inside a lockout set by 4.6.7 parks a tank that was
 heating normally, once. A disinfection cycle that waits for eco is slowed by lockouts like any
 other heat under the gate.
+
+### Surplus heat has to fit the surplus (4.7.0, optional)
+
+Decided by the owner on 2026-11-23 from three days of history: surplus heat ran 9, 0 and 21
+minutes while the array was throttled. On 2026-11-23 both heaters (1850 W, 1190 W) started on a
+surplus of 3.8 kW of sun less a 1.3 kW house, the pack gave 300 to 600 W, and the detector
+withdrew the surplus from both after 21 minutes. On 2026-11-21 it took 5 minutes, then the
+30-minute lockout sat on a full pack with the array at 0.8 kW, then 3 minutes more. The stagger
+spaces starts; it never asked whether the second one fits.
+
+Inert without `surplus_power_entity` (and the entity is ignored without a surplus entity). With
+it:
+
+- **What is sized** is `_heat_depends_on_surplus()`: heat that would stop if the surplus left.
+  The gate open on the surplus alone under an enforcing policy; otherwise (no policy, or the
+  utility or the template opening the gate too) only the boost's heat above what the plain
+  thermostat would do (`_normal_control_heats`, which keeps the element's state inside the
+  hysteresis band as the control pass does). Never during the startup grace, never while locked
+  out, never while shed. `performance` under an enforcing policy is sized: the gate would stop
+  it. The ON button stands the policy down, so that heat is not.
+- **Admission** (`fleet.request_surplus`, asked in `_async_heater_turn_on` before the stagger and
+  only for an element that is off): a 2 s window so every heater's request is in, then one
+  heater per 60 s settle; **the tank closest to its goal first** (owner, 2026-11-23: one tank at
+  its target is hot water, two halfway there are none; the first cut ranked the coldest first and
+  was changed before it shipped). `_surplus_distance()` gives the rank: a tank below its normal
+  target by its distance to that target, whatever a boost would add; a tank that has its normal
+  target by what is left to its boost target and as `extra`, after every tank that has not; a
+  disinfection cycle by its own goal. A rival counts only if it would itself be admitted; fits when spare >= draw x 1.1, or the reading is `curtailed`
+  (a trial), or there is no reading. Refusals reuse the cooldown retry and `fleet_hold_reason`.
+  **The four reason texts are constants**: they are a published attribute, and numbers in them
+  wrote a row a minute for as long as a heater waited (review). The numbers go to the debug log.
+- **Who is counted** (`_sync_surplus_claim`, called from the switch handler, eco input changes,
+  every evaluation, the end of setup and the end of the grace): an element that is on with heat
+  that depends on the surplus holds a claim, however it got there. A reload or restart forgets
+  claims; they are adopted on sight, dated from the stagger's `last_admitted` where it survived.
+- **Release** (`fleet.surplus_release_due`, from the power sensor's events and
+  `_surplus_fit_timer`, since a stepped sensor sitting at one short value sends one event): spare
+  below -150 W for 60 s (150 s when one claim is left), never inside a settle; the claim with
+  the latest start goes. `_async_surplus_fit_release` sets **the existing lockout**
+  (`surplus_boost_locked_until`), so the eco gate and the boost close for that heater and the
+  ordinary control pass turns it off as its own echo. Term: `SURPLUS_FIT_LOCKOUT` (15 min) after
+  a run of 10 minutes or more; `SURPLUS_BOOST_LOCKOUT` after a shorter one, doubled per
+  consecutive failure up to `SURPLUS_FIT_LOCKOUT_MAX`, the count cleared by a lasting run or by
+  the surplus leaving. A restore still clamps to one `SURPLUS_BOOST_LOCKOUT`.
+- **A released heater stays counted until its relay is off** (`mark_surplus_releasing`). With a
+  `min_on_duration` the OFF is held back; dropping the claim at once left a load nobody was
+  counted for, the reading stayed short, and the sibling was released after it (review, twice
+  reproduced). While one is releasing nobody else is picked. The exception in
+  `_sync_surplus_claim` holds only while this heater still means to be off
+  (`_last_commanded_switch_state`), so a person switching it back on frees the claim.
+- **The label** `Waiting for more surplus` (`SURPLUS_FIT_LABEL`) covers a start waiting on the fit
+  and a lockout the fit set; a restore tells that lockout from a short-run one by the stored label.
+
+Constants and their reasons are at the top of `fleet.py` and in `water_heater_const.py`. The
+release has to land before a battery-judged detector withdraws the surplus from everyone (500 W
+for 3 minutes on the install): 60 s and 120 s do, and so does the single heater's 150 s.
+
+Costs, accepted. Closest-first can leave a surplus less used than coldest-first would: on
+3.8 kW of sun with a 1.3 kW house only one heater fits, and when the closer tank is the 1190 W
+one the 1850 W one is tried, released, and waits. A kettle beside two running heaters parks the
+last one for 15 minutes. A heater
+never seen running is taken for 2000 W and may wait on a surplus it would fit until it has run
+once (the utility, a person or a `curtailed` trial). A trial on a held-back array that fails
+costs a minute of battery at the shortfall and a wait. With `min_on_duration` a released heater
+draws until its minimum is up and `eco_gated` reads false meanwhile, as for any heat the gate
+stops under that minimum. Release order after a full restart is the order the heaters loaded in.
+
+What was mutated (2026-11-23, in a copy outside the synced folder): 70 guards across `fleet.py`,
+the mixins and the config flow, all caught after tests were added for the first run's nine
+survivors; then 10 more on the start order when it changed to closest-first, all caught. Reviewed adversarially by five lenses the same day; the fixes above marked "review"
+came from it. Left as found: an unknown draw is assumed, not probed (a probe on any positive
+spare would cycle an unmetered heater every lockout).
 
 ### Power (mirror) is a copy and must never be counted
 
@@ -681,9 +762,9 @@ options form.
 | `water_heater_switch.py` | the control loop, switch commands, cooldown, fleet admission, failsafe and outage timers, load shed |
 | `water_heater_eco.py` | Smart Eco: eco condition, pause/resume, off-until-target |
 | `water_heater_disinfection.py` | disinfection cycles: start, end, give-up |
-| `water_heater_surplus.py` | surplus boost, forecast pre-heat, the heating goal |
+| `water_heater_surplus.py` | surplus boost, forecast pre-heat, the heating goal, the surplus fit's heater side |
 | `water_heater_const.py` | timings and constants the mixins share (re-exported from `water_heater.py`) |
-| `fleet.py` | switch-on staggering; pure logic, imports nothing from Home Assistant |
+| `fleet.py` | switch-on staggering and the surplus fit's decisions; pure logic, imports nothing from Home Assistant |
 | `config_flow.py` | sectioned config/options forms, flat storage |
 | `sensor.py` | Smart Eco state, legionella risk, max-temp history, Disinfection Due In, Disinfection Hold Progress, Power (mirror) |
 | `temperature_filter.py` | single-sample spike rejection; pure logic, no Home Assistant imports |
@@ -706,6 +787,17 @@ the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py`, `element_heal
 ---
 
 ## Open items
+
+- **Surplus fit (4.7.0, written 2026-11-23): not released, not on the install.** In the working
+  tree with `manifest.json` at 4.7.0; 841 tests pass. It does nothing until `surplus_power_entity`
+  is set on each heater, which on the owner's install waits for the inverter integration's
+  `PV Surplus Power` sensor (its 0.3.33, also unreleased). To see on hardware once both are live
+  and configured: on a surplus one heater starts, the second a minute or more later and only if
+  the reading allows; `fleet_hold_reason` and `Waiting for more surplus` on the one waiting;
+  `element_draw_w` near 1850 and 1200 after each has run once; on a shortfall one relay
+  operation, not two, and the other heater's `smart_eco_state` staying `Heating in eco`. Not
+  decided: whether the unknown-draw assumption needs a configured fallback for an unmetered
+  heater (the owner's are both metered).
 
 - `water_heater.py` serves temperatures under both the `native_*` names (read by 2026.11, where the
   plain ones are deprecated and stop working in 2027.11) and the plain names (all 2026.10 has).

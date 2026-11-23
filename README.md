@@ -155,6 +155,7 @@ diagnostics and anything reading the entry see no sections.
 | `min_off_duration` | duration | `120 seconds` | Minimum time the heater must stay off before it can be turned on. A configured `0` means zero; the default applies only when the option is absent. |
 | `surplus_entity` | entity_id | empty | Says there is spare power to use (for example a PV-excess binary sensor). While active, heating is allowed, and the surplus boost may heat past the normal target. |
 | `surplus_state` | string | `on` | The state of `surplus_entity` that means active. Compared ignoring case. |
+| `surplus_power_entity` | entity_id | empty | Optional power sensor saying how much the surplus can still carry, in W or kW, negative when it is short. With it, heat that depends on the surplus has to fit it: see "Surplus fit". An attribute `curtailed: true` on the sensor means more is available than the number says. Needs `surplus_entity`. Empty = the surplus entity alone decides. |
 | `utility_entity` | entity_id | empty | Says the utility supply is carrying the house. While active and the heater's **Eco: Use Utility** switch is on, heating is allowed up to the normal target. Adds that switch. |
 | `utility_state` | string | `on` | The state of `utility_entity` that means active, for example `Utility` for an enum power-source sensor. Compared ignoring case. |
 | `eco_mode_template_condition` | template | empty | Optional extra term: a boolean template that also allows heating when true. If this and both entities are empty, Smart Eco Mode entities are not created and no Smart Eco policy is applied. |
@@ -166,7 +167,7 @@ diagnostics and anything reading the entry see no sections.
 | `enable_max_temp_history_sensor` | boolean | `false` | Adds a sensor to the same device that exposes the highest recorded temperature in the last 7 days (useful in anti-legionella monitoring workflows). |
 | `enable_hot_water_in_use` | boolean | `false` | Adds the Hot Water In Use binary sensor described below. |
 | `water_in_use_entity` | entity_id | empty | Optional whole-house flow or pump signal. **Corroborates** the Hot Water In Use sensor on ambiguous fall rates; it does not gate it, and leaving it empty only costs the middle tier. |
-| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). It never starts heat and never balances anything; its one use in control is stop-only, as evidence that the tank is being heated for the stale-reading failsafe ("A reading that does not move"). Otherwise it is published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. A boost kept through a Home Assistant start (see "After a Home Assistant restart") reads `false` until the surplus entity is active again: it does not stop when the surplus leaves. |
+| `power_sensor` | entity_id | empty | Optional meter on the element's circuit, in any of Home Assistant's power units (W, kW, ...). It never starts heat and never balances anything; its one use in control is stop-only, as evidence that the tank is being heated for the stale-reading failsafe ("A reading that does not move"). Since 4.7.0 it also teaches the heater its element's draw (published as `element_draw_w`, to the nearest 50 W), which the surplus fit compares with the spare power when a `surplus_power_entity` is set. Otherwise it is published as the heater's `power_sensor` attribute, so another integration can follow the element's live draw from the heater (a meter swap is then edited here once). Setting it also adds a **Power (mirror)** sensor to the heater's device (entity id ending `_power_mirror`, so nothing matching `_power` picks it up) — a mirror of the meter for the UI, with no `state_class` (so it never feeds statistics or the Energy dashboard; keep using the meter there) and a `mirror_of` attribute naming the meter. A mirror cannot be chosen as the meter. When the meter is on a different device than the heater switch (a relay fed by a separate metering breaker), the meter's device is also listed under the heater device's **Linked devices**, beside the switch's (Home Assistant 2026.9 or newer). Alongside it the heater publishes `eco_gated`: `true` only while its heat depends on the Smart Eco condition (policy enforcing, the condition true and the startup grace over, `electric`, no disinfection, not shed), i.e. it would stop if the condition went false — or while it heats only because of the surplus boost (the tank past its normal target plus hot tolerance), which stops when the surplus leaves. A boost kept through a Home Assistant start (see "After a Home Assistant restart") reads `false` until the surplus entity is active again: it does not stop when the surplus leaves. |
 | `enable_element_fault` | boolean | `true` | The Element Fault sensor. Needs `power_sensor`. |
 | `enable_heat_up_rate` | boolean | `true` | The Heat-up Rate and Ready At sensors. |
 | `enable_energy_split` | boolean | `true` | The three Energy Today sensors. Needs `power_sensor`. |
@@ -209,6 +210,46 @@ Set `fleet_stagger_seconds` to `0` on every instance to restore the previous unc
 Current fleet state is exposed on each water heater entity as the `fleet_stagger_seconds` and
 `fleet_hold_reason` attributes. `fleet_hold_reason` names exactly why a heater is currently waiting.
 
+### Surplus fit (4.7.0, optional)
+
+A surplus entity says *that* there is spare power, not how much. A detector that judges it from a
+battery sees the heaters' own draw: two heaters started a stagger apart on a surplus that can carry
+one of them discharge the battery, the detector withdraws the surplus from both, and both stop.
+(Two heaters of 1850 W and 1190 W on 3.8 kW of sun and a 1.3 kW house: both parked after 21
+minutes with the tanks cold. On a 2.8 kW afternoon: 8 minutes of heat in 40.)
+
+Set `surplus_power_entity` and heat that depends on the surplus has to fit it:
+
+- **One at a time, and only if it fits.** A heater starts on the surplus only when the spare power
+  covers its draw and a tenth over. The draw is the heater's own, read from its `power_sensor`
+  while it runs (`element_draw_w`); a heater never seen running is taken for 2000 W. After any
+  heater starts or stops on the surplus, nothing else is decided for 60 s, so each decision is made
+  on a reading that already shows the last one.
+- **The tank closest to its goal goes first**, so that one tank reaches its target before two
+  are merely warm. A tank still short of its normal target is ranked by its distance to that
+  target and goes before any tank that only has boost heat left, however close that one is to its
+  boost target. The exception: if the closest tank does not fit and another does, the other
+  starts, so the surplus is not left idle for a heater that cannot use it.
+- **When the surplus runs short, the last heater started stops first** and the others carry on:
+  spare power below −150 W for a minute (two and a half minutes for the last heater left, so it
+  rides out a kettle). The heater that stopped waits 15 minutes before it asks again, or the
+  30-minute short-run lockout if it had been on for less than 10 minutes, doubled each time it
+  fails again on the same surplus (up to 2 hours).
+- **`curtailed`.** A full battery makes the inverter hold the array back: more is available than is
+  being used, by an amount nobody can measure, and the sensor reads about zero. A power sensor that
+  says so (attribute `curtailed: true`) gets one heater admitted as a trial; a minute later the
+  reading has its answer.
+- Smart Eco State reads **`Waiting for more surplus`** while a start waits on the fit and while a
+  heater that gave its heat up waits to ask again. `fleet_hold_reason` says which rule is holding
+  a start.
+
+What the fit never touches: heat a person asked for with the ON button, heat the utility or the
+template also allows, a tank the plain thermostat heats with Smart Eco off, a load shed, and the
+failsafes. (`performance` chosen under an enforcing policy is still heat the eco gate would stop,
+so it is sized like any other.) With no reading from the sensor the heaters behave as if it were
+not configured. With a `min_on_duration`, a heater told to stop may stay on until that time is up;
+nothing else is told to stop for the load it still is.
+
 ### Power balancing is deliberately not done here (changed in 2.0.0)
 
 Until 2.0.0 this integration also ran nameplate-watt admission control: a per-instance
@@ -226,6 +267,10 @@ house is the one that should give way.
 
 Staggering stayed because it is not the same problem. It is about the instant at which two elements
 step on together -- sequencing, not budgeting -- and it needs no nameplate to do its job.
+
+The surplus fit above is not that machinery coming back. It holds no budget and no list of
+nameplates, weighs nothing against the supply's capacity, and can only delay heat that exists
+because a surplus was announced; a load balancer still outranks it.
 
 For coordinated shedding driven by a real budget, see the load-shedding services below: an external
 balancer calls `generic_water_heater.shed` and `.release`, and that is the supported way to have

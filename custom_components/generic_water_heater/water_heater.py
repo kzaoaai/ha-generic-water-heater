@@ -71,6 +71,7 @@ from . import (
     CONF_SENSOR,
     CONF_SURPLUS_BOOST_TARGET,
     CONF_SURPLUS_ENTITY,
+    CONF_SURPLUS_POWER_ENTITY,
     CONF_SURPLUS_STATE,
     CONF_TARGET_TEMP,
     CONF_TEMP_MAX,
@@ -120,6 +121,7 @@ from .water_heater_const import (  # noqa: F401  (re-exported for tests)
     OWN_ECHO_WINDOW,
     SURPLUS_BOOST_SHORT_RUN,
     SURPLUS_BOOST_LOCKOUT,
+    SURPLUS_FIT_LABEL,
     DISINFECTION_BYPASS_HOURS,
     OUTAGE_REPAIR_AFTER,
     FAILSAFE_WARN_AFTER,
@@ -166,6 +168,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     fleet_stagger_seconds = data.get(CONF_FLEET_STAGGER_SECONDS, DEFAULT_STAGGER_SECONDS)
     power_sensor = (data.get(CONF_POWER_SENSOR) or "").strip() or None
     surplus_entity = (data.get(CONF_SURPLUS_ENTITY) or "").strip() or None
+    surplus_power_entity = (data.get(CONF_SURPLUS_POWER_ENTITY) or "").strip() or None
     utility_entity = (data.get(CONF_UTILITY_ENTITY) or "").strip() or None
     surplus_boost_target = data.get(CONF_SURPLUS_BOOST_TARGET)
     if surplus_boost_target in ("",):
@@ -245,6 +248,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         power_sensor=power_sensor,
         surplus_entity=surplus_entity,
         surplus_state=data.get(CONF_SURPLUS_STATE) or DEFAULT_ACTIVE_STATE,
+        # Without a surplus entity there is nothing for the power to size.
+        surplus_power_entity=surplus_power_entity if surplus_entity else None,
         utility_entity=utility_entity,
         utility_state=data.get(CONF_UTILITY_STATE) or DEFAULT_ACTIVE_STATE,
         surplus_boost_target=(
@@ -402,9 +407,24 @@ class GenericWaterHeater(
         utility_state=DEFAULT_ACTIVE_STATE,
         surplus_boost_target=None,
         forecast_preheat=None,
+        surplus_power_entity=None,
     ):
         """Initialize the water_heater device."""
         self.hass = hass
+        # Surplus fit (4.7.0; fleet.py). The power sensor, the draw this
+        # heater's own meter showed while its element was on (None until it
+        # has been seen running; published and restored), and the timer that
+        # looks again at a reading that is short and not changing.
+        self._surplus_power_entity = surplus_power_entity
+        self._element_draw_w: float | None = None
+        self._surplus_fit_timer = None
+        # Why the surplus lockout is running: "short" (a short run,
+        # _handle_surplus_edge) or "fit" (released by the fit). Label only.
+        self._surplus_lock_reason: str | None = None
+        # Starts on this surplus that the fit had to take back within
+        # SURPLUS_BOOST_SHORT_RUN. Each one doubles the next wait; a run that
+        # lasts, or the surplus leaving, starts the count again.
+        self._surplus_fit_failures = 0
         # Published. Read for control in one place, stop-only (_heated_now).
         self._power_sensor = power_sensor
         self._attr_name = name
@@ -670,6 +690,10 @@ class GenericWaterHeater(
                 if self._surplus_boost_locked()
                 else None
             ),
+            # What this heater's meter showed with the element on, to the
+            # nearest 50 W, or None before it has been seen running. The
+            # surplus fit compares it with the spare power. Restored.
+            "element_draw_w": self._element_draw_w,
             # The number the tank sensor was stuck on when its reading was
             # found stale (heated for STALE_READING_AFTER without moving), or
             # None. While it is set the failsafe holds the element off and
@@ -982,6 +1006,15 @@ class GenericWaterHeater(
                 )
             )
 
+        if self._surplus_power_entity is not None:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass,
+                    [self._surplus_power_entity],
+                    self._async_surplus_power_changed,
+                )
+            )
+
         if self.hass.state is not CoreState.running:
             # Only a Home Assistant start. A config-entry reload happens with
             # every source entity already loaded, so it needs no grace.
@@ -1134,6 +1167,11 @@ class GenericWaterHeater(
             if isinstance(restored_until, str):
                 self._manual_performance_until = dt_util.parse_datetime(restored_until)
 
+            # The element's draw as its meter last showed it (surplus fit).
+            restored_draw = _number(old_state.attributes.get("element_draw_w"))
+            if restored_draw is not None and restored_draw > 0:
+                self._element_draw_w = restored_draw
+
             # A shed is the balancer's to end, not a reload's. Before this an
             # options save, a reload or a restart during a shed came back
             # un-shed and energised the element on a supply the balancer
@@ -1162,6 +1200,9 @@ class GenericWaterHeater(
                     locked_until, dt_util.utcnow() + SURPLUS_BOOST_LOCKOUT
                 )
                 self._surplus_boost_locked_until = locked_until
+                # Why it was running is not stored on its own; the label is.
+                if old_state.attributes.get("smart_eco_state") == SURPLUS_FIT_LABEL:
+                    self._surplus_lock_reason = "fit"
                 self._surplus_boost_lockout_timer = async_call_later(
                     self.hass,
                     (locked_until - dt_util.utcnow()).total_seconds(),
@@ -1357,6 +1398,12 @@ class GenericWaterHeater(
         # a command the entity never meant to issue.
         await self._async_evaluate_disinfection()
         await self._async_control_heating()
+        # An element found on with heat that hangs on the surplus is counted
+        # from here, and a reading that is already short is answered: a reload
+        # sends no event of its own, and a stepped sensor sitting at one short
+        # value sends none either (found in review: 300 s of shortfall after a
+        # reload with nobody counted).
+        await self._async_evaluate_surplus_fit()
         # An element found on is being heated from now, as far as the watch
         # can know (a count from before the restart was restored above).
         self._refresh_heating_watch()
@@ -1392,9 +1439,11 @@ class GenericWaterHeater(
             self._switch_unavailable_timer,
             self._manual_performance_timer,
             self._stale_reading_timer,
+            self._surplus_fit_timer,
         ):
             if cancel_timer is not None:
                 cancel_timer()
+        self._surplus_fit_timer = None
         self._stale_reading_timer = None
         self._manual_performance_timer = None
         self._sensor_outage_timer = None

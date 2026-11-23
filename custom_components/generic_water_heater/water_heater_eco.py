@@ -24,6 +24,7 @@ from . import (
 from .water_heater_const import (
     STARTUP_GRACE,
     DISINFECTION_BYPASS_HOURS,
+    SURPLUS_FIT_LABEL,
     _LOGGER,
 )
 
@@ -132,6 +133,9 @@ class SmartEcoMixin:
         self._debug_log("startup grace over; eco condition now enforced")
         self._update_smart_eco_state()
         await self._async_control_heating()
+        # From here an element found on with heat that hangs on the surplus is
+        # counted, and a reading that is already short is answered.
+        await self._async_evaluate_surplus_fit()
 
     @callback
     def _has_eco_condition(self) -> bool:
@@ -257,6 +261,8 @@ class SmartEcoMixin:
         if event:
             self.async_set_context(event.context)
 
+        # What this heater's heat depends on may just have changed.
+        self._sync_surplus_claim()
         self._update_smart_eco_state()
         self.async_write_ha_state()
 
@@ -380,10 +386,20 @@ class SmartEcoMixin:
             and self._surplus_boost_locked()
         ):
             # The surplus reads active and the tank is parked all the same:
-            # say why. When it ends is surplus_boost_locked_until.
-            state = "Waiting after a short surplus"
+            # say why. When it ends is surplus_boost_locked_until. Locked by a
+            # short run, or released by the fit (4.7.0): the surplus could not
+            # carry this heater beside its siblings.
+            state = (
+                SURPLUS_FIT_LABEL
+                if self._surplus_lock_reason == "fit"
+                else "Waiting after a short surplus"
+            )
         elif self._is_smart_eco_enforcing() and not self._eco_condition_met:
             state = "Blocked by eco condition"
+        elif self._eco_condition_met and self._surplus_fit_held():
+            # The condition is met and the element is off all the same: its
+            # start is waiting for the surplus to fit it (4.7.0).
+            state = SURPLUS_FIT_LABEL
         elif self._eco_condition_met and self._smart_eco_logical_heating_active():
             state = "Heating in eco"
         else:

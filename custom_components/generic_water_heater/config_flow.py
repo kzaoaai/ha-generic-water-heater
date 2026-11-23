@@ -32,6 +32,7 @@ from . import (
     CONF_SENSOR,
     CONF_SURPLUS_BOOST_TARGET,
     CONF_SURPLUS_ENTITY,
+    CONF_SURPLUS_POWER_ENTITY,
     CONF_SURPLUS_STATE,
     CONF_TEMP_MAX,
     CONF_UTILITY_ENTITY,
@@ -83,6 +84,7 @@ SECTIONS: dict[str, tuple[str, ...]] = {
     "smart_eco": (
         CONF_SURPLUS_ENTITY,
         CONF_SURPLUS_STATE,
+        CONF_SURPLUS_POWER_ENTITY,
         CONF_UTILITY_ENTITY,
         CONF_UTILITY_STATE,
         CONF_ECO_TEMPLATE,
@@ -175,6 +177,12 @@ def _build_data_schema(current: dict | None = None) -> vol.Schema:
                     CONF_SURPLUS_STATE,
                     default=current.get(CONF_SURPLUS_STATE) or DEFAULT_ACTIVE_STATE,
                 ): selector({"text": {}}),
+                vol.Optional(
+                    CONF_SURPLUS_POWER_ENTITY,
+                    description={
+                        "suggested_value": current.get(CONF_SURPLUS_POWER_ENTITY) or None
+                    },
+                ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
                 vol.Optional(
                     CONF_UTILITY_ENTITY,
                     description={"suggested_value": current.get(CONF_UTILITY_ENTITY) or None},
@@ -349,6 +357,19 @@ def _surplus_boost_errors(flat: dict) -> dict:
     return {}
 
 
+def _surplus_power_errors(flat: dict) -> dict:
+    """Refuse a surplus power sensor with no surplus entity to qualify.
+
+    The power only sizes heat the surplus entity has already allowed; alone it
+    would be accepted and do nothing, silently.
+    """
+    if not (flat.get(CONF_SURPLUS_POWER_ENTITY) or "").strip():
+        return {}
+    if not (flat.get(CONF_SURPLUS_ENTITY) or "").strip():
+        return {"base": "surplus_power_needs_surplus_entity"}
+    return {}
+
+
 def _forecast_preheat_errors(flat: dict) -> dict:
     """Refuse a pre-heat that could never act, as for the boost."""
     if not flat.get(CONF_ENABLE_FORECAST_PREHEAT):
@@ -375,6 +396,7 @@ def _apply_cleared_and_defaults(user_input: dict) -> dict:
     flat.setdefault(CONF_ECO_TEMPLATE, "")
     flat.setdefault(CONF_SURPLUS_ENTITY, "")
     flat.setdefault(CONF_SURPLUS_STATE, DEFAULT_ACTIVE_STATE)
+    flat.setdefault(CONF_SURPLUS_POWER_ENTITY, "")
     flat.setdefault(CONF_UTILITY_ENTITY, "")
     flat.setdefault(CONF_UTILITY_STATE, DEFAULT_ACTIVE_STATE)
     flat.setdefault(CONF_SURPLUS_BOOST_TARGET, None)
@@ -417,6 +439,7 @@ class GenericWaterHeaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _heater_in_use_errors(self.hass, flat)
                 or _power_sensor_errors(self.hass, flat)
                 or _surplus_boost_errors(flat)
+                or _surplus_power_errors(flat)
                 or _forecast_preheat_errors(flat)
             )
             if not errors:
@@ -440,6 +463,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 _heater_in_use_errors(self.hass, flat, self.config_entry.entry_id)
                 or _power_sensor_errors(self.hass, flat)
                 or _surplus_boost_errors(flat)
+                or _surplus_power_errors(flat)
                 or _forecast_preheat_errors(flat)
             )
             if not errors:

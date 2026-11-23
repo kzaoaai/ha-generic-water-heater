@@ -68,6 +68,12 @@ CONF_SURPLUS_STATE = "surplus_state"
 CONF_UTILITY_ENTITY = "utility_entity"
 CONF_UTILITY_STATE = "utility_state"
 DEFAULT_ACTIVE_STATE = "on"
+# Optional (4.7.0): a power sensor saying how much the surplus can still carry,
+# in W or kW, negative for a shortfall. With it, heat that depends on the surplus
+# is admitted one heater at a time and only if its draw fits (fleet.py, "Surplus
+# fit"). An attribute `curtailed: true` on it means the reading is a lower bound.
+# Unset, nothing changes: the surplus entity alone decides, as before.
+CONF_SURPLUS_POWER_ENTITY = "surplus_power_entity"
 # Heat toward this target, instead of the normal one, while surplus is active
 # and the "Boost: Use PV Excess" switch is on. Unset = no boost.
 CONF_SURPLUS_BOOST_TARGET = "surplus_boost_target_temperature"

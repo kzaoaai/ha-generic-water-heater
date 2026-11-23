@@ -43,6 +43,30 @@ OWN_ECHO_WINDOW = timedelta(seconds=30)
 # utility or the template allows is still never locked out.
 SURPLUS_BOOST_SHORT_RUN = timedelta(minutes=10)
 SURPLUS_BOOST_LOCKOUT = timedelta(minutes=30)
+# A heater that gave its surplus heat up because the surplus went short (4.7.0,
+# fleet.py "Surplus fit") does not ask again for this long, when it had been
+# heating for longer than SHORT_RUN. Shorter than the lockout above because it
+# costs less to be wrong: the heater went off alone, after a minute of a small
+# shortfall, and its siblings kept heating. Without any wait it would be
+# admitted again at once wherever the reading is a lower bound (a held-back
+# array reads "more is there" the moment the load is gone). A heater released
+# within SHORT_RUN of starting waits the full LOCKOUT, like any short run.
+SURPLUS_FIT_LOCKOUT = timedelta(minutes=15)
+# A start the fit had to take back within SHORT_RUN waits LOCKOUT, and twice as
+# long each time it fails again on the same surplus, up to this. A full pack
+# with the array held back says "more is there" all afternoon without saying
+# how much: the second heater tried on it failed every 31 minutes in a
+# reviewer's simulation, two relay operations and about 20 Wh from the pack
+# each time. The count starts again with a run that lasts or a new surplus.
+SURPLUS_FIT_LOCKOUT_MAX = timedelta(hours=2)
+# The distance to its goal given to a tank whose temperature cannot be read.
+SURPLUS_DISTANCE_UNKNOWN = 999.0
+# The Smart Eco state while a start waits on the fit, or after the fit took
+# this heater's surplus heat back. Restored from to tell the two lockouts apart.
+SURPLUS_FIT_LABEL = "Waiting for more surplus"
+# A meter reading counts as the element's draw only this long after the relay
+# last changed: the first reports after a switch-on can be a partial sample.
+ELEMENT_DRAW_SETTLE = timedelta(seconds=20)
 
 # How long a disinfection cycle that does not wait for eco ("Once", "As needed")
 # may stand the eco policy down. It used to share the manual-pause bound

@@ -17,6 +17,7 @@ from homeassistant.helpers import issue_registry as ir
 import homeassistant.util.dt as dt_util
 from . import DOMAIN, SMART_ECO_MODE_OFF_UNTIL_TARGET, celsius_system
 from .element_health import DRAW_W, below_any_cutout, to_watts
+from .fleet import ADMIT
 from .reading_health import moved
 from .temperature_filter import finite
 from .water_heater_const import (
@@ -292,8 +293,13 @@ class SwitchControlMixin:
 
     @callback
     def _async_meter_changed(self, _event) -> None:
-        """The meter reported. Evidence for the watch only: no control pass."""
+        """The meter reported. Evidence for the watch only: no control pass.
+
+        Since 4.7.0 it also teaches the element's draw (_learn_element_draw),
+        which the surplus fit compares with the spare power.
+        """
         self._refresh_heating_watch()
+        self._learn_element_draw()
 
     async def _async_reading_overdue(self, _now) -> None:
         """Heated for STALE_READING_AFTER and the reading has not moved."""
@@ -558,6 +564,8 @@ class SwitchControlMixin:
                 self._fleet.note_switch_on(self._entry_id, now)
             else:
                 self._fleet.note_switch_off(self._entry_id)
+                # An element that is off heats on nothing, the surplus included.
+                self._fleet.release_surplus(self._entry_id, now)
             had_pending = self._pending_switch_state is not None
 
             # If we have no record of what we last commanded, seed from old_state so we
@@ -693,6 +701,7 @@ class SwitchControlMixin:
                     and new_state.state == STATE_ON
                 ),
             )
+        self._sync_surplus_claim()
         self._refresh_heating_watch()
         self._debug_log_hvac_action("switch state update")
         self._update_smart_eco_state()
@@ -922,6 +931,9 @@ class SwitchControlMixin:
             self._eco_condition_met,
         )
 
+        # A meter that reads steadily reports once, at the switch-on, inside the
+        # settle; the draw is then read here, on a later pass. Reads only.
+        self._learn_element_draw()
         # Checked before the load-shed return below, so a tank held down by the
         # balancer for days still abandons a hopeless cycle rather than keeping
         # the request standing forever with nobody told.
@@ -1187,11 +1199,28 @@ class SwitchControlMixin:
             # never be handed a stagger hold or a retry it cannot use.
             self._fleet.note_switch_on(self._entry_id, now)
 
+        # Surplus fit, before the stagger: heat that depends on the surplus
+        # starts only if this heater's draw fits what the surplus can carry,
+        # one heater at a time (fleet.py). An element already on is not asked
+        # about; it is counted where it is seen (_sync_surplus_claim).
+        decision = ADMIT
+        if (heater is None or heater.state != STATE_ON) and self._surplus_fit_applies():
+            distance, extra = self._surplus_distance()
+            decision = self._fleet.request_surplus(
+                self._entry_id,
+                now,
+                reading=self._read_surplus_power(),
+                draw_w=self._element_draw_w,
+                distance=distance,
+                extra=extra,
+            )
+
         # Fleet-wide switch-on staggering. Several instances driven by one
         # shared eco template all reach this point in the same event-loop pass,
         # so this is the only place that can stop them stepping the inverter in
         # one go.
-        decision = self._fleet.request_turn_on(self._entry_id, now)
+        if decision.admitted:
+            decision = self._fleet.request_turn_on(self._entry_id, now)
         if not decision.admitted:
             self._fleet_hold_reason = decision.reason
             self._pending_switch_state = STATE_ON
@@ -1210,9 +1239,14 @@ class SwitchControlMixin:
                 decision.retry_after,
             )
             self._async_schedule_cooldown_retry(decision.retry_after)
+            # The label says a start is waiting on the fit.
+            self._update_smart_eco_state()
             return
 
+        was_held = self._fleet_hold_reason is not None
         self._fleet_hold_reason = None
+        if was_held:
+            self._update_smart_eco_state()
         self._last_commanded_switch_state = STATE_ON
         if heater is None or heater.state == STATE_ON:
             return
@@ -1263,6 +1297,8 @@ class SwitchControlMixin:
         # records when it last STARTED, which is what spacing is measured from.
         self._fleet_hold_reason = None
         self._fleet.note_switch_off(self._entry_id)
+        # And it is no longer asking for, or heating on, the surplus.
+        self._fleet.release_surplus(self._entry_id, now)
         heater = self.hass.states.get(self.heater_entity_id)
         if heater is None or heater.state == STATE_OFF:
             return
