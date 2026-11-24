@@ -788,9 +788,10 @@ the `water_heater*.py` modules. `heat_rate.py`, `energy_split.py`, `element_heal
 
 ## Open items
 
-- **Surplus fit (4.7.0, written 2026-11-23): released, installed, not yet loaded.** Released as
-  v4.7.0 on 2026-11-23 and installed on the owner's install the same day (every file checked
-  against the release); it loads at the next Home Assistant restart, which is the owner's to do.
+- **Surplus fit (4.7.0, written 2026-11-23): released, loaded and configured; no surplus run
+  seen yet.** Released as v4.7.0 on 2026-11-23 and installed on the owner's install the same day
+  (every file checked against the release); loaded at the 2026-11-24 restart with no errors, and
+  the surplus power sensor was set on both heaters that morning.
   841 tests pass. A read of the release notes against the code before publishing corrected one
   README sentence (what happens while the sensor has no reading). It does nothing until
   `surplus_power_entity` is set on each heater, which on the owner's install waits for the
